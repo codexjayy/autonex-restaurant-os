@@ -25,11 +25,24 @@ jobs:
           --health-timeout=5s
           --health-retries=10
 
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=5
+
     env:
       NODE_ENV: test
       DATABASE_MIGRATION_URL: postgresql://postgres:postgres@localhost:5432/autonex?schema=public
       DATABASE_URL: postgresql://autonex_app:autonex_app_pass@localhost:5432/autonex?schema=public
       DATABASE_ADMIN_URL: postgresql://autonex_admin:autonex_admin_pass@localhost:5432/autonex?schema=public
+      REDIS_URL: redis://localhost:6379
+      REDIS_ENABLED: "false"
+      SKIP_REDIS_CONNECT: "true"
       JWT_ACCESS_SECRET: ci_access_secret_min_32_characters_long_001
       JWT_REFRESH_SECRET: ci_refresh_secret_min_32_characters_long_002
       QR_SIGNING_SECRET: ci_qr_secret_min_32_characters_long_003
@@ -79,4 +92,12 @@ jobs:
 
       - name: Build All Workspaces
         run: pnpm build
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @autonex/web exec playwright install --with-deps chromium
+
+      - name: Run Playwright E2E Tests
+        run: pnpm test:e2e
+        env:
+          CI: "true"
 

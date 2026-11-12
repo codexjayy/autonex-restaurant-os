@@ -68,6 +68,10 @@ const KITCHEN_STATUS_STYLE: Record<string, { label: string; className: string }>
     label: 'Sent to Kitchen',
     className: 'bg-sky-50 text-sky-700 ring-1 ring-sky-200',
   },
+  [KitchenStatus.ACKNOWLEDGED]: {
+    label: 'Accepted by Kitchen',
+    className: 'bg-cyan-50 text-cyan-700 ring-1 ring-cyan-200',
+  },
   [KitchenStatus.PREPARING]: {
     label: 'Preparing',
     className: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
@@ -955,9 +959,20 @@ export default function CustomerQrOrderingPage() {
                             <DietaryBadge type={item.dietaryType} />
                             <h3 className="font-semibold text-slate-900">{item.name}</h3>
                           </div>
-                          <p className="mt-1 text-sm font-bold text-slate-900">
-                            {formatInrFromPaise(item.basePricePaise)}
-                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-bold text-slate-900">
+                              {formatInrFromPaise(item.basePricePaise)}
+                            </p>
+                            {item.prepTimeMinutes && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                                <Clock className="h-3 w-3" />
+                                ~{item.prepTimeMinutes} min
+                              </span>
+                            )}
+                            {item.taxMode === 'INCLUSIVE' && (
+                              <span className="text-[11px] text-slate-500">Incl. GST</span>
+                            )}
+                          </div>
                           {item.description && (
                             <p className="mt-1 text-xs text-slate-500">{item.description}</p>
                           )}

@@ -7,20 +7,28 @@
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@autonex/permissions": "workspace:*",
     "@autonex/shared": "workspace:*",
+    "@autonex/types": "workspace:*",
+    "@autonex/ui": "workspace:*",
+    "@autonex/validation": "workspace:*",
     "lucide-react": "^0.475.0",
     "next": "^15.2.4",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "socket.io-client": "^4.8.4"
+    "socket.io-client": "^4.8.4",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@next/eslint-plugin-next": "^15.2.4",
+    "@playwright/test": "^1.50.1",
     "@types/node": "^22.10.2",
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.0.10",

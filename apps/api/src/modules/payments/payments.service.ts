@@ -17,12 +17,15 @@ import {
   BillStatus as PrismaBillStatus,
   DiningSessionStatus as PrismaDiningSessionStatus,
   GuestJoinStatus as PrismaGuestJoinStatus,
+  KitchenStatus as PrismaKitchenStatus,
+  OrderItemStatus as PrismaOrderItemStatus,
   OutboxStatus as PrismaOutboxStatus,
   PaymentMethod as PrismaPaymentMethod,
   PaymentProvider as PrismaPaymentProvider,
   PaymentStatus as PrismaPaymentStatus,
   Prisma,
   RefundStatus as PrismaRefundStatus,
+  TableStatus as PrismaTableStatus,
   WebhookStatus as PrismaWebhookStatus,
 } from '@prisma/client';
 import { TenantContextService } from '../../common/context/tenant-context.service';
@@ -248,32 +251,62 @@ export class PaymentsService {
 
     if (
       progress.status === BillStatus.PAID &&
-      bill.session.status !== PrismaDiningSessionStatus.CLOSED &&
-      bill.session.status !== PrismaDiningSessionStatus.SETTLED
+      bill.session.status !== PrismaDiningSessionStatus.CLOSED
     ) {
-      await tx.diningSession.update({
-        where: { id: bill.sessionId },
-        data: {
-          status: PrismaDiningSessionStatus.SETTLED,
-          settledAt: now,
-          settledByMembershipId: params.confirmedByMembershipId ?? null,
-        },
-      });
+      let unbilledActiveItemsCount = 0;
+      if (tx.orderItem?.count) {
+        const billedItemIds = await tx.billLine
+          ?.findMany?.({
+            where: { billId: bill.id, orderItemId: { not: null } },
+            select: { orderItemId: true },
+          })
+          .then((rows) => rows.map((r) => r.orderItemId).filter((id): id is string => Boolean(id)))
+          .catch(() => []);
 
-      await this.emitPaymentOutbox(tx, {
-        tenantId: params.tenantId,
-        outletId: params.outletId,
-        topic: 'session.updated',
-        aggregateType: 'DiningSession',
-        aggregateId: bill.sessionId,
-        payload: {
-          sessionId: bill.sessionId,
-          tableId: bill.session.tableId,
-          status: PrismaDiningSessionStatus.SETTLED,
-          lifecycleStage: 'SETTLED',
-          action: 'payment_settled',
-        },
-      });
+        unbilledActiveItemsCount = await tx.orderItem.count({
+          where: {
+            status: PrismaOrderItemStatus.ACTIVE,
+            quantity: { gt: 0 },
+            ...(billedItemIds && billedItemIds.length > 0 ? { id: { notIn: billedItemIds } } : {}),
+            order: {
+              sessionId: bill.sessionId,
+              kitchenStatus: { not: PrismaKitchenStatus.CANCELLED },
+            },
+          },
+        });
+      }
+
+      if (unbilledActiveItemsCount === 0 && bill.session.status !== PrismaDiningSessionStatus.SETTLED) {
+        await tx.diningSession.update({
+          where: { id: bill.sessionId },
+          data: {
+            status: PrismaDiningSessionStatus.SETTLED,
+            settledAt: now,
+            settledByMembershipId: params.confirmedByMembershipId ?? null,
+          },
+        });
+
+        await tx.restaurantTable?.update?.({
+          where: { id: bill.session.tableId },
+          data: { status: PrismaTableStatus.AVAILABLE },
+        });
+
+        await this.emitPaymentOutbox(tx, {
+          tenantId: params.tenantId,
+          outletId: params.outletId,
+          topic: 'session.updated',
+          aggregateType: 'DiningSession',
+          aggregateId: bill.sessionId,
+          payload: {
+            sessionId: bill.sessionId,
+            tableId: bill.session.tableId,
+            status: PrismaDiningSessionStatus.SETTLED,
+            tableStatus: PrismaTableStatus.AVAILABLE,
+            lifecycleStage: 'SETTLED',
+            action: 'payment_settled',
+          },
+        });
+      }
     }
 
     await tx.auditLog.create({
@@ -406,7 +439,7 @@ export class PaymentsService {
     const ipAddress = this.tenantContext.get()?.ipAddress ?? null;
 
     try {
-      return await this.prisma.runInTenantTx(async (tx) => {
+      const txResult = await this.prisma.runInTenantTx(async (tx) => {
         const existingIdem = await tx.paymentAttempt.findFirst({
           where: { idempotencyKey },
         });
@@ -417,10 +450,9 @@ export class PaymentsService {
               message: 'Idempotency-Key was already used for another bill.',
             });
           }
-          const hydratedBill = await tx.bill.findFirst({ where: { id: billId } });
           return {
             attempt: existingIdem,
-            billStatus: hydratedBill?.status,
+            billId,
             idempotentReplay: true,
           };
         }
@@ -483,13 +515,19 @@ export class PaymentsService {
           ipAddress,
         });
 
-        const updatedBill = await this.billingService.getBill(principal, bill.id);
         return {
           attempt: result.attempt,
-          bill: updatedBill,
+          billId: bill.id,
           idempotentReplay: result.idempotentReplay,
         };
       }, ctx.tenantId);
+
+      const updatedBill = await this.billingService.getBill(principal, txResult.billId);
+      return {
+        attempt: txResult.attempt,
+        bill: updatedBill,
+        idempotentReplay: txResult.idempotentReplay,
+      };
     } catch (err) {
       if ((err as { code?: string })?.code === 'P2002') {
         const bill = await this.billingService.getBill(principal, billId);
@@ -1137,9 +1175,9 @@ export class PaymentsService {
       gatewayRefundId = gwRefund.gatewayRefundId;
     }
 
-    return this.prisma.runInTenantTx(async (tx) => {
+    const createdRefund = await this.prisma.runInTenantTx(async (tx) => {
       const now = new Date();
-      const createdRefund = await tx.refund.create({
+      const refundRow = await tx.refund.create({
         data: {
           tenantId: ctx.tenantId,
           billId: pre.bill.id,
@@ -1181,6 +1219,11 @@ export class PaymentsService {
             settledByMembershipId: null,
           },
         });
+
+        await tx.restaurantTable?.update?.({
+          where: { id: pre.bill.session.tableId },
+          data: { status: PrismaTableStatus.OCCUPIED },
+        });
       }
 
       await tx.auditLog.create({
@@ -1190,7 +1233,7 @@ export class PaymentsService {
           actorRole: ctx.role,
           action: 'BILL_REFUND_ISSUED',
           entityType: 'Refund',
-          entityId: createdRefund.id,
+          entityId: refundRow.id,
           afterJson: {
             billId: pre.bill.id,
             paymentAttemptId: pre.attempt.id,
@@ -1212,14 +1255,16 @@ export class PaymentsService {
           billId: pre.bill.id,
           sessionId: pre.bill.sessionId,
           tableId: pre.bill.session.tableId,
-          refundId: createdRefund.id,
+          refundId: refundRow.id,
           amountPaise: pre.refundAmount,
           billStatus: progress.status,
         },
       });
 
-      const updatedBill = await this.billingService.getBill(principal, pre.bill.id);
-      return { refund: createdRefund, bill: updatedBill };
+      return refundRow;
     }, ctx.tenantId);
+
+    const updatedBill = await this.billingService.getBill(principal, pre.bill.id);
+    return { refund: createdRefund, bill: updatedBill };
   }
 }

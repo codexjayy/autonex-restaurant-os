@@ -58,10 +58,14 @@ function makeTicket(overrides: Partial<KdsTicketPayload> = {}): KdsTicketPayload
 
 describe('KDS state machine & disconnect/reconnect sync reconciliation', () => {
   it('enforces valid kitchen transition graph strictly', () => {
+    assert.equal(canTransitionKitchenStatus(KitchenStatus.NEW, KitchenStatus.ACKNOWLEDGED), true);
+    assert.equal(canTransitionKitchenStatus(KitchenStatus.ACKNOWLEDGED, KitchenStatus.PREPARING), true);
     assert.equal(canTransitionKitchenStatus(KitchenStatus.NEW, KitchenStatus.PREPARING), true);
     assert.equal(canTransitionKitchenStatus(KitchenStatus.PREPARING, KitchenStatus.READY), true);
     assert.equal(canTransitionKitchenStatus(KitchenStatus.READY, KitchenStatus.SERVED), true);
 
+    assert.equal(canTransitionKitchenStatus(KitchenStatus.ACKNOWLEDGED, KitchenStatus.READY), false);
+    assert.equal(canTransitionKitchenStatus(KitchenStatus.ACKNOWLEDGED, KitchenStatus.SERVED), false);
     assert.equal(canTransitionKitchenStatus(KitchenStatus.NEW, KitchenStatus.READY), false);
     assert.equal(canTransitionKitchenStatus(KitchenStatus.NEW, KitchenStatus.SERVED), false);
     assert.equal(canTransitionKitchenStatus(KitchenStatus.SERVED, KitchenStatus.PREPARING), false);

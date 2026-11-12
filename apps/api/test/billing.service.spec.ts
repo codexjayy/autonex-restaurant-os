@@ -54,6 +54,7 @@ describe('BillingService & ReceiptPdfService — Phase 6 Consolidated Billing, T
         gstRateBps: overrides?.gstRateBps ?? 500,
         taxMode: overrides?.taxMode ?? TaxMode.EXCLUSIVE,
         roundOffEnabled: overrides?.roundOffEnabled ?? false,
+        timezone: 'Asia/Kolkata',
         invoiceSeq: 0,
       },
       table: {
@@ -62,6 +63,7 @@ describe('BillingService & ReceiptPdfService — Phase 6 Consolidated Billing, T
         outletId,
         tableNumber: '5',
         label: 'Window Corner',
+        status: 'OCCUPIED',
       },
       session: {
         id: sessionId,
@@ -292,11 +294,25 @@ describe('BillingService & ReceiptPdfService — Phase 6 Consolidated Billing, T
           return { count: before - state.billLines.length };
         }),
       },
+      restaurantTable: {
+        update: jest.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+          if (where.id === state.table.id) Object.assign(state.table, data);
+          return state.table;
+        }),
+      },
+      paymentAttempt: {
+        findMany: jest.fn(async () => state.paymentAttempts),
+      },
+      refund: {
+        findMany: jest.fn(async () => state.refunds),
+      },
       auditLog: {
         create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
-          state.auditLogs.push({ id: nextUuid(), ...data });
-          return data;
+          const row = { id: nextUuid(), createdAt: new Date(), ...data };
+          state.auditLogs.push(row);
+          return row;
         }),
+        findMany: jest.fn(async () => [...state.auditLogs].reverse()),
       },
       outboxEvent: {
         create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
@@ -463,5 +479,62 @@ describe('BillingService & ReceiptPdfService — Phase 6 Consolidated Billing, T
     ).rejects.toMatchObject({
       response: { code: ErrorCode.BILL_NOT_FOUND },
     });
+  });
+
+  it('supports percentage discounts, item-wise GST breakup, open-bill refresh after item edits, audit trail, and revenue analytics', async () => {
+    const { state, service } = createBillingHarness();
+    const first = await service.generateOrRefreshBill(cashierPrincipal, sessionId, {});
+    expect(first.bill.itemGstBreakdown).toBeDefined();
+    const gstSumCgst = (first.bill.itemGstBreakdown ?? []).reduce((s, r) => s + r.cgstPaise, 0);
+    expect(gstSumCgst).toBe(first.bill.cgstPaise);
+
+    // Simulate adding ₹100 item to order before finalizing payment, then refresh OPEN bill
+    state.orders[0]!.items.push({
+      id: 'oi-new',
+      orderId: 'order-1',
+      itemNameSnapshot: 'Gulab Jamun',
+      modifiersSnapshotJson: [],
+      quantity: 2,
+      unitPricePaise: 5000,
+      lineTotalPaise: 10000,
+      status: 'ACTIVE',
+      createdAt: new Date(),
+    });
+
+    const refreshed = await service.generateOrRefreshBill(cashierPrincipal, sessionId, {
+      refresh: true,
+    });
+    expect(refreshed.bill.subtotalPaise).toBe(first.bill.subtotalPaise + 10000);
+
+    // Apply 10% percentage discount (1000 bps)
+    const discounted = await service.applyAuditedDiscount(cashierPrincipal, refreshed.bill.id, {
+      discountPercentBps: 1000,
+      reason: 'Festival 10% offer',
+    });
+    expect(discounted.discountPaise).toBe(Math.round(refreshed.bill.subtotalPaise * 0.1));
+    expect((discounted.itemGstBreakdown ?? []).reduce((s, r) => s + r.cgstPaise, 0)).toBe(
+      discounted.cgstPaise,
+    );
+
+    const audit = await service.getBillAuditLogs(cashierPrincipal, discounted.id);
+    expect(audit.some((a) => a.action === 'BILL_DISCOUNT_APPLIED')).toBe(true);
+    expect(audit.some((a) => a.action === 'BILL_REFRESHED_FROM_ORDERS')).toBe(true);
+
+    // Analytics computes today's pending due, daily/weekly/monthly buckets cleanly
+    state.paymentAttempts.push({
+      id: 'pa-1',
+      billId: discounted.id,
+      method: 'CASH',
+      provider: 'MANUAL',
+      amountPaise: 10000,
+      status: 'SUCCEEDED',
+      completedAt: new Date(),
+      createdAt: new Date(),
+    });
+    const analytics = await service.getBillingAnalytics(cashierPrincipal);
+    expect(analytics.today.cashCollectedPaise).toBe(10000);
+    expect(analytics.daily).toHaveLength(14);
+    expect(analytics.weekly.length).toBeGreaterThanOrEqual(7);
+    expect(analytics.monthly).toHaveLength(6);
   });
 });

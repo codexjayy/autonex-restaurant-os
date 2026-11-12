@@ -139,3 +139,127 @@ export class ListSupportCasesQueryDto {
   limit?: number;
 }
 
+export class ExtendTrialDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  days!: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(250)
+  reason?: string;
+}
+
+export class MarkInvoicePaidDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  paymentRef?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(250)
+  notes?: string;
+}
+
+export class ListAdminUsersQueryDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  scope?: 'all' | 'super_admins' | 'tenant_users';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  role?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  search?: string;
+}
+
+export class CreateSuperAdminDto {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  name!: string;
+
+  @IsEmail()
+  email!: string;
+
+  @IsString()
+  @MinLength(8)
+  @MaxLength(20)
+  phone!: string;
+
+  @IsString()
+  @MinLength(10)
+  @MaxLength(72)
+  password!: string;
+}
+
+export class UpdateUserStatusDto {
+  @IsBoolean()
+  isActive!: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(250)
+  reason?: string;
+}
+
+export class UpdatePlatformSettingsDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(120)
+  platformName?: string;
+
+  @IsOptional()
+  @IsEmail()
+  supportEmail?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(20)
+  supportPhone?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  defaultTrialDays?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(30)
+  defaultGraceDays?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(2800)
+  saasGstRateBps?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  autoApproveRegistrations?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  maintenanceMode?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  maintenanceMessage?: string;
+}
+

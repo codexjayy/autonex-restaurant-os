@@ -24,6 +24,7 @@ enum TenantStatus {
   GRACE
   LOCKED
   SUSPENDED
+  REJECTED
 }
 
 enum StaffRole {
@@ -32,6 +33,13 @@ enum StaffRole {
   CASHIER
   WAITER
   KITCHEN
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
 }
 
 enum DietaryType {
@@ -48,6 +56,7 @@ enum SelectionType {
 enum TableStatus {
   AVAILABLE
   OCCUPIED
+  RESERVED
   BILL_REQUESTED
 }
 
@@ -71,10 +80,18 @@ enum OrderSource {
 
 enum KitchenStatus {
   NEW
+  ACKNOWLEDGED
   PREPARING
   READY
   SERVED
   CANCELLED
+}
+
+enum KitchenStation {
+  MAIN_KITCHEN
+  BAR
+  BAKERY
+  DESSERTS
 }
 
 enum OrderItemStatus {
@@ -195,14 +212,24 @@ model Tenant {
   status                        TenantStatus @default(PENDING_APPROVAL)
   approvedAt                    DateTime?    @map("approved_at") @db.Timestamptz()
   approvedByUserId              String?      @map("approved_by_user_id") @db.Uuid
+  rejectedAt                    DateTime?    @map("rejected_at") @db.Timestamptz()
+  rejectedByUserId              String?      @map("rejected_by_user_id") @db.Uuid
+  rejectionReason               String?      @map("rejection_reason") @db.VarChar(300)
   suspensionReason              String?      @map("suspension_reason") @db.VarChar(300)
   pendingSuspensionAfterService Boolean      @default(false) @map("pending_suspension_after_service")
   suspendedAt                   DateTime?    @map("suspended_at") @db.Timestamptz()
   offboardedAt                  DateTime?    @map("offboarded_at") @db.Timestamptz()
+  deletedAt                     DateTime?    @map("deleted_at") @db.Timestamptz()
   createdAt                     DateTime     @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt                     DateTime     @updatedAt @map("updated_at") @db.Timestamptz()
 
   approvedByUser       User?                 @relation("TenantApprovedBy", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  rejectedByUser       User?                 @relation("TenantRejectedBy", fields: [rejectedByUserId], references: [id], onDelete: SetNull)
+  settings             TenantSettings?
+  outletSettings       OutletSettings[]
+  roles                Role[]
+  invitations          Invitation[]
+  sessions             Session[]
   outlets              Outlet[]
   memberships          Membership[]
   refreshTokens        RefreshToken[]
@@ -251,10 +278,14 @@ model Outlet {
   invoiceSeq            Int      @default(0) @map("invoice_seq")
   kotSeq                Int      @default(0) @map("kot_seq")
   isActive              Boolean  @default(true) @map("is_active")
+  deletedAt             DateTime? @map("deleted_at") @db.Timestamptz()
   createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz()
 
   tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  settings         OutletSettings?
+  invitations      Invitation[]
+  sessions         Session[]
   memberships      Membership[]
   categories       Category[]
   menuItems        MenuItem[]
@@ -271,21 +302,30 @@ model Outlet {
 }
 
 model User {
-  id           String   @id @default(uuid()) @db.Uuid
-  email        String?  @unique @db.VarChar(160)
-  phone        String   @unique @db.VarChar(20)
-  name         String   @db.VarChar(100)
-  passwordHash String?  @map("password_hash") @db.VarChar(255)
-  isSuperAdmin Boolean  @default(false) @map("is_super_admin")
-  mfaEnabled   Boolean  @default(false) @map("mfa_enabled")
-  mfaSecretEnc String?  @map("mfa_secret_enc") @db.VarChar(255)
-  isActive     Boolean  @default(true) @map("is_active")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+  id                  String    @id @default(uuid()) @db.Uuid
+  email               String?   @unique @db.VarChar(160)
+  phone               String    @unique @db.VarChar(20)
+  name                String    @db.VarChar(100)
+  passwordHash        String?   @map("password_hash") @db.VarChar(255)
+  isSuperAdmin        Boolean   @default(false) @map("is_super_admin")
+  mfaEnabled          Boolean   @default(false) @map("mfa_enabled")
+  mfaSecretEnc        String?   @map("mfa_secret_enc") @db.VarChar(255)
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until") @db.Timestamptz()
+  lastLoginAt         DateTime? @map("last_login_at") @db.Timestamptz()
+  passwordChangedAt   DateTime? @map("password_changed_at") @db.Timestamptz()
+  isActive            Boolean   @default(true) @map("is_active")
+  deletedAt           DateTime? @map("deleted_at") @db.Timestamptz()
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
 
   memberships          Membership[]
   refreshTokens        RefreshToken[]
+  sessions             Session[]
+  passwordResetTokens  PasswordResetToken[]
+  sentInvitations      Invitation[]      @relation("InvitationSentBy")
   approvedTenants      Tenant[]          @relation("TenantApprovedBy")
+  rejectedTenants      Tenant[]          @relation("TenantRejectedBy")
   auditLogs            AuditLog[]
   createdSupportCases  SupportCase[]     @relation("SupportCreatedBy")
   assignedSupportCases SupportCase[]     @relation("SupportAssignedTo")
@@ -294,22 +334,40 @@ model User {
   @@map("users")
 }
 
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.VarChar(128)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz()
+  usedAt    DateTime? @map("used_at") @db.Timestamptz()
+  ipAddress String?   @map("ip_address") @db.VarChar(45)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("password_reset_tokens")
+}
+
 model Membership {
   id             String    @id @default(uuid()) @db.Uuid
   tenantId       String    @map("tenant_id") @db.Uuid
   outletId       String    @map("outlet_id") @db.Uuid
   userId         String    @map("user_id") @db.Uuid
   role           StaffRole
+  roleId         String?   @map("role_id") @db.Uuid
   staffPinHash   String    @map("staff_pin_hash") @db.VarChar(255)
   failedAttempts Int       @default(0) @map("failed_attempts")
   lockedUntil    DateTime? @map("locked_until") @db.Timestamptz()
   isActive       Boolean   @default(true) @map("is_active")
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz()
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  outlet  Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleDef Role?  @relation(fields: [roleId], references: [id], onDelete: SetNull)
 
   openedSessions     DiningSession[] @relation("SessionOpenedBy")
   settledSessions    DiningSession[] @relation("SessionSettledBy")
@@ -366,6 +424,140 @@ model AuditLog {
 }
 
 // ============================================================================
+// MILESTONE 1 NORMALIZED FOUNDATION TABLES (SETTINGS, RBAC, INVITES, SESSIONS)
+// ============================================================================
+
+model TenantSettings {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenantId            String   @unique @map("tenant_id") @db.Uuid
+  currency            String   @default("INR") @db.VarChar(10)
+  locale              String   @default("en-IN") @db.VarChar(20)
+  defaultTimezone     String   @default("Asia/Kolkata") @map("default_timezone") @db.VarChar(60)
+  onboardingCompleted Boolean  @default(false) @map("onboarding_completed")
+  onboardingStep      Int      @default(1) @map("onboarding_step")
+  metadataJson        Json     @default("{}") @map("metadata_json")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_settings")
+}
+
+model OutletSettings {
+  id                    String   @id @default(uuid()) @db.Uuid
+  tenantId              String   @map("tenant_id") @db.Uuid
+  outletId              String   @unique @map("outlet_id") @db.Uuid
+  taxMode               TaxMode  @default(EXCLUSIVE) @map("tax_mode")
+  gstRateBps            Int      @default(500) @map("gst_rate_bps")
+  roundOffEnabled       Boolean  @default(false) @map("round_off_enabled")
+  requireWaiterApproval Boolean  @default(false) @map("require_waiter_approval")
+  tablePinEnabled       Boolean  @default(false) @map("table_pin_enabled")
+  kdsLanguage           String   @default("en") @map("kds_language") @db.VarChar(10)
+  receiptFooter         String?  @map("receipt_footer") @db.VarChar(240)
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, outletId])
+  @@map("outlet_settings")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String?  @map("tenant_id") @db.Uuid
+  code        String   @db.VarChar(40)
+  name        String   @db.VarChar(80)
+  description String?  @db.VarChar(240)
+  isSystem    Boolean  @default(true) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  tenant          Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships     Membership[]
+  rolePermissions RolePermission[]
+
+  @@unique([tenantId, code])
+  @@index([isSystem, code])
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique @db.VarChar(80)
+  name        String   @db.VarChar(120)
+  module      String   @db.VarChar(40)
+  description String?  @db.VarChar(240)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String @id @default(uuid()) @db.Uuid
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model Invitation {
+  id              String           @id @default(uuid()) @db.Uuid
+  tenantId        String           @map("tenant_id") @db.Uuid
+  outletId        String           @map("outlet_id") @db.Uuid
+  invitedByUserId String           @map("invited_by_user_id") @db.Uuid
+  email           String?          @db.VarChar(160)
+  phone           String           @db.VarChar(20)
+  name            String           @db.VarChar(100)
+  role            StaffRole
+  tokenHash       String           @unique @map("token_hash") @db.VarChar(128)
+  status          InvitationStatus @default(PENDING)
+  expiresAt       DateTime         @map("expires_at") @db.Timestamptz()
+  acceptedAt      DateTime?        @map("accepted_at") @db.Timestamptz()
+  revokedAt       DateTime?        @map("revoked_at") @db.Timestamptz()
+  deletedAt       DateTime?        @map("deleted_at") @db.Timestamptz()
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz()
+
+  tenant        Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  outlet        Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  invitedByUser User   @relation("InvitationSentBy", fields: [invitedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, outletId, status])
+  @@map("invitations")
+}
+
+model Session {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenantId     String?   @map("tenant_id") @db.Uuid
+  outletId     String?   @map("outlet_id") @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  familyId     String    @unique @map("family_id") @db.Uuid
+  ipAddress    String?   @map("ip_address") @db.VarChar(45)
+  userAgent    String?   @map("user_agent") @db.VarChar(300)
+  lastActiveAt DateTime  @default(now()) @map("last_active_at") @db.Timestamptz()
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz()
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz()
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  outlet Outlet? @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, revokedAt])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ============================================================================
 // PHASE 2: MENU MANAGEMENT & QR GENERATION TABLES
 // ============================================================================
 
@@ -396,8 +588,12 @@ model MenuItem {
   name           String      @db.VarChar(120)
   description    String?     @db.VarChar(280)
   dietaryType    DietaryType @default(VEG) @map("dietary_type")
-  basePricePaise Int         @map("base_price_paise")
-  imageUrl       String?     @map("image_url")
+  basePricePaise  Int         @map("base_price_paise")
+  prepTimeMinutes Int?          @map("prep_time_minutes")
+  kitchenStation  KitchenStation @default(MAIN_KITCHEN) @map("kitchen_station")
+  gstRateBps      Int?          @map("gst_rate_bps")
+  taxMode         TaxMode?    @map("tax_mode")
+  imageUrl        String?     @map("image_url")
   inStock        Boolean     @default(true) @map("in_stock")
   isActive       Boolean     @default(true) @map("is_active")
   sortOrder      Int         @default(0) @map("sort_order")
@@ -451,14 +647,15 @@ model ModifierOption {
 }
 
 model RestaurantTable {
-  id          String      @id @default(uuid()) @db.Uuid
-  tenantId    String      @map("tenant_id") @db.Uuid
-  outletId    String      @map("outlet_id") @db.Uuid
-  tableNumber String      @map("table_number") @db.VarChar(20)
-  label       String?     @db.VarChar(60)
-  capacity    Int         @default(4)
-  status      TableStatus @default(AVAILABLE)
-  isActive    Boolean     @default(true) @map("is_active")
+  id           String      @id @default(uuid()) @db.Uuid
+  tenantId     String      @map("tenant_id") @db.Uuid
+  outletId     String      @map("outlet_id") @db.Uuid
+  tableNumber  String      @map("table_number") @db.VarChar(20)
+  label        String?     @db.VarChar(60)
+  floorSection String?     @map("floor_section") @db.VarChar(60)
+  capacity     Int         @default(4)
+  status       TableStatus @default(AVAILABLE)
+  isActive     Boolean     @default(true) @map("is_active")
   createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz()
 
@@ -602,6 +799,7 @@ model OrderItem {
   quantity               Int
   lineTotalPaise         Int             @map("line_total_paise")
   prepNotes              String?         @map("prep_notes") @db.VarChar(200)
+  kitchenStationSnapshot KitchenStation  @default(MAIN_KITCHEN) @map("kitchen_station_snapshot")
   status                 OrderItemStatus @default(ACTIVE)
   createdAt              DateTime        @default(now()) @map("created_at") @db.Timestamptz()
 
@@ -946,4 +1144,21 @@ model SupportCaseNote {
 
   @@index([tenantId, supportCaseId, createdAt])
   @@map("support_case_notes")
+}
+
+model PlatformSettings {
+  id                       String   @id @default("default") @db.VarChar(30)
+  platformName             String   @default("AutoNex Restaurant OS") @map("platform_name") @db.VarChar(120)
+  supportEmail             String   @default("support@autonex.in") @map("support_email") @db.VarChar(160)
+  supportPhone             String   @default("+919999999999") @map("support_phone") @db.VarChar(20)
+  defaultTrialDays         Int      @default(14) @map("default_trial_days")
+  defaultGraceDays         Int      @default(3) @map("default_grace_days")
+  saasGstRateBps           Int      @default(1800) @map("saas_gst_rate_bps")
+  autoApproveRegistrations Boolean  @default(false) @map("auto_approve_registrations")
+  maintenanceMode          Boolean  @default(false) @map("maintenance_mode")
+  maintenanceMessage       String?  @map("maintenance_message") @db.VarChar(300)
+  updatedByUserId          String?  @map("updated_by_user_id") @db.Uuid
+  updatedAt                DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  @@map("platform_settings")
 }

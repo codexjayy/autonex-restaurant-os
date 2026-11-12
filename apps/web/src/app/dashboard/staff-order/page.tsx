@@ -427,9 +427,11 @@ export default function StaffAssistedOrderingPage() {
                                         ? 'bg-emerald-100 text-emerald-800'
                                         : order.kitchenStatus === KitchenStatus.PREPARING
                                           ? 'bg-amber-100 text-amber-800'
-                                          : order.kitchenStatus === KitchenStatus.SERVED
-                                            ? 'bg-slate-200 text-slate-700'
-                                            : 'bg-sky-100 text-sky-800'
+                                          : order.kitchenStatus === KitchenStatus.ACKNOWLEDGED
+                                            ? 'bg-cyan-100 text-cyan-800'
+                                            : order.kitchenStatus === KitchenStatus.SERVED
+                                              ? 'bg-slate-200 text-slate-700'
+                                              : 'bg-sky-100 text-sky-800'
                                     }`}
                                   >
                                     {order.kitchenStatus}

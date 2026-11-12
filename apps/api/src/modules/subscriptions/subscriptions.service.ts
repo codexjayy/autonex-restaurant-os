@@ -1,10 +1,13 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
+import { RealtimeEventsService } from '../../common/realtime/realtime-events.service';
 import {
   DEFAULT_GRACE_DAYS,
   DEFAULT_TRIAL_DAYS,
@@ -54,6 +57,7 @@ export class SubscriptionsService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenantContext: TenantContextService,
+    @Optional() private readonly realtimeEvents?: RealtimeEventsService,
   ) {}
 
   onModuleInit(): void {
@@ -738,7 +742,7 @@ export class SubscriptionsService implements OnModuleInit, OnModuleDestroy {
       db.subscriptionInvoice.count(),
     );
 
-    return this.prisma.runAsSystemAdmin((db) =>
+    const result = await this.prisma.runAsSystemAdmin((db) =>
       db.$transaction(async (tx) => {
         const [tenant, plan, existingSub] = await Promise.all([
           tx.tenant.findUnique({ where: { id: tenantId } }),
@@ -913,11 +917,24 @@ export class SubscriptionsService implements OnModuleInit, OnModuleDestroy {
         };
       }),
     );
+
+    this.realtimeEvents?.emit({
+      type: 'subscription.updated',
+      tenantId,
+      tenantWide: true,
+      payload: {
+        tenantId,
+        planCode: result.subscription?.plan?.code ?? null,
+        status: result.subscription?.status ?? null,
+      },
+    });
+    return result;
   }
 
   async listAllSubscriptions() {
     const subs = await this.prisma.runAsSystemAdmin((db) =>
       db.subscription.findMany({
+        where: { tenant: { deletedAt: null } },
         orderBy: { updatedAt: 'desc' },
         include: {
           plan: true,
@@ -971,6 +988,8 @@ export class SubscriptionsService implements OnModuleInit, OnModuleDestroy {
         tablesByTenant,
         staffByTenant,
         openSupportCasesCount,
+        paidSubInvoicesAgg,
+        allTimeBillsAgg,
       ] = await Promise.all([
         db.tenant.findMany({
           orderBy: { createdAt: 'desc' },
@@ -1026,6 +1045,16 @@ export class SubscriptionsService implements OnModuleInit, OnModuleDestroy {
         db.supportCase.count({
           where: { status: { in: ['OPEN', 'IN_PROGRESS'] } },
         }),
+        db.subscriptionInvoice?.aggregate?.({
+          where: { status: 'PAID' },
+          _sum: { totalPaise: true },
+        }) ?? Promise.resolve(null),
+        db.bill?.aggregate?.({
+          where: {
+            status: { in: [PrismaBillStatus.PAID, PrismaBillStatus.PARTIALLY_PAID] },
+          },
+          _sum: { paidPaise: true },
+        }) ?? Promise.resolve(null),
       ]);
 
       const restaurantsByStatus: Record<TenantStatus, number> = {
@@ -1035,6 +1064,7 @@ export class SubscriptionsService implements OnModuleInit, OnModuleDestroy {
         [TenantStatus.GRACE]: 0,
         [TenantStatus.LOCKED]: 0,
         [TenantStatus.SUSPENDED]: 0,
+        [TenantStatus.REJECTED]: 0,
       };
       for (const t of tenants) {
         restaurantsByStatus[t.status as TenantStatus] =
@@ -1107,19 +1137,347 @@ export class SubscriptionsService implements OnModuleInit, OnModuleDestroy {
         };
       });
 
+      const totalSubscriptionRevenuePaise = paidSubInvoicesAgg?._sum?.totalPaise ?? 0;
+      const totalRestaurantRevenuePaise =
+        allTimeBillsAgg?._sum?.paidPaise ?? platformRevenueLast30DaysPaise;
+
       return {
         overview: {
           restaurantsByStatus,
           subscriptionsByStatus,
           totalRestaurants: tenants.length,
+          approvedRestaurantsCount:
+            restaurantsByStatus[TenantStatus.ACTIVE] + restaurantsByStatus[TenantStatus.TRIAL],
+          pendingApprovalCount: restaurantsByStatus[TenantStatus.PENDING_APPROVAL],
+          rejectedCount: restaurantsByStatus[TenantStatus.REJECTED],
           mrrPaise,
+          totalSubscriptionRevenuePaise,
           platformOrdersLast30Days,
           platformSessionsLast30Days,
           platformRevenueLast30DaysPaise,
+          totalRestaurantRevenuePaise,
           openSupportCasesCount,
         },
         restaurantsTelemetry,
       };
     });
+  }
+
+  async extendTrial(
+    principal: AuthenticatedPrincipal,
+    tenantId: string,
+    days: number,
+    reason?: string,
+  ) {
+    const ipAddress = this.tenantContext.get()?.ipAddress ?? null;
+    const safeDays = Math.min(Math.max(Math.round(days), 1), 90);
+
+    return this.prisma.runAsSystemAdmin((db) =>
+      db.$transaction(async (tx) => {
+        const tenant = await tx.tenant.findUnique({ where: { id: tenantId } });
+        if (!tenant) {
+          throw new NotFoundException({
+            code: ErrorCode.NOT_FOUND,
+            message: 'Restaurant tenant not found.',
+          });
+        }
+
+        if (
+          tenant.status === PrismaTenantStatus.PENDING_APPROVAL ||
+          tenant.status === PrismaTenantStatus.REJECTED
+        ) {
+          throw new BadRequestException({
+            code: ErrorCode.VALIDATION_ERROR,
+            message: `Cannot extend trial while restaurant is ${tenant.status}. Approve or reactivate first.`,
+          });
+        }
+
+        const existingSub = await tx.subscription.findUnique({
+          where: { tenantId },
+          include: { plan: true },
+        });
+        const sub =
+          existingSub ?? (await this.provisionDefaultTrialTx(tx, { tenantId }));
+        if (!sub) {
+          throw new NotFoundException({
+            code: ErrorCode.PLAN_NOT_FOUND,
+            message: 'Subscription record not found for tenant.',
+          });
+        }
+
+        const now = new Date();
+        const baseEnd =
+          sub.trialEndsAt && sub.trialEndsAt.getTime() > now.getTime()
+            ? sub.trialEndsAt
+            : now;
+        const newTrialEnd = new Date(baseEnd.getTime() + safeDays * MS_PER_DAY);
+
+        const updatedSub = await tx.subscription.update({
+          where: { id: sub.id },
+          data: {
+            status: PrismaSubscriptionStatus.TRIAL,
+            trialEndsAt: newTrialEnd,
+            currentPeriodEnd: newTrialEnd,
+            graceEndsAt: null,
+          },
+          include: { plan: true },
+        });
+
+        if (
+          tenant.status === PrismaTenantStatus.GRACE ||
+          tenant.status === PrismaTenantStatus.LOCKED ||
+          tenant.status === PrismaTenantStatus.SUSPENDED
+        ) {
+          await tx.tenant.update({
+            where: { id: tenantId },
+            data: {
+              status: PrismaTenantStatus.TRIAL,
+              pendingSuspensionAfterService: false,
+              suspendedAt: null,
+              suspensionReason: null,
+            },
+          });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            tenantId,
+            actorUserId: principal.userId,
+            actorRole: principal.role,
+            action: 'SUBSCRIPTION_TRIAL_EXTENDED',
+            entityType: 'Subscription',
+            entityId: sub.id,
+            beforeJson: {
+              status: sub.status,
+              trialEndsAt: sub.trialEndsAt?.toISOString() ?? null,
+            },
+            afterJson: {
+              status: updatedSub.status,
+              trialEndsAt: newTrialEnd.toISOString(),
+              addedDays: safeDays,
+              reason: reason?.trim() ?? null,
+            },
+            ipAddress,
+          },
+        });
+
+        const res = {
+          id: updatedSub.id,
+          tenantId: updatedSub.tenantId,
+          status: updatedSub.status,
+          trialEndsAt: updatedSub.trialEndsAt?.toISOString() ?? null,
+          currentPeriodEnd: updatedSub.currentPeriodEnd?.toISOString() ?? null,
+          planName: updatedSub.plan.name,
+        };
+        this.realtimeEvents?.emit({
+          type: 'trial.updated',
+          tenantId,
+          tenantWide: true,
+          payload: res,
+        });
+        return res;
+      }),
+    );
+  }
+
+  async listAdminPayments() {
+    const now = new Date();
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * MS_PER_DAY);
+
+    return this.prisma.runAsSystemAdmin(async (db) => {
+      const [
+        invoices,
+        paidSubAgg,
+        pendingSubAgg,
+        activeSubs,
+        todayBillsByTenant,
+        thirtyDayBillsByTenant,
+        tenants,
+      ] = await Promise.all([
+        db.subscriptionInvoice.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 100,
+          include: {
+            plan: { select: { name: true, code: true } },
+            tenant: { select: { id: true, name: true, slug: true, status: true } },
+          },
+        }),
+        db.subscriptionInvoice.aggregate({
+          where: { status: PrismaSubscriptionInvoiceStatus.PAID },
+          _sum: { totalPaise: true },
+        }),
+        db.subscriptionInvoice.aggregate({
+          where: { status: PrismaSubscriptionInvoiceStatus.PENDING },
+          _sum: { totalPaise: true },
+        }),
+        db.subscription.findMany({
+          where: { status: PrismaSubscriptionStatus.ACTIVE },
+          include: { plan: true },
+        }),
+        db.bill.groupBy({
+          by: ['tenantId'],
+          where: {
+            status: { in: [PrismaBillStatus.PAID, PrismaBillStatus.PARTIALLY_PAID] },
+            createdAt: { gte: todayStart },
+          },
+          _sum: { paidPaise: true },
+          _count: { _all: true },
+        }),
+        db.bill.groupBy({
+          by: ['tenantId'],
+          where: {
+            status: { in: [PrismaBillStatus.PAID, PrismaBillStatus.PARTIALLY_PAID] },
+            createdAt: { gte: thirtyDaysAgo },
+          },
+          _sum: { paidPaise: true },
+          _count: { _all: true },
+        }),
+        db.tenant.findMany({
+          where: { deletedAt: null },
+          select: { id: true, name: true, slug: true, status: true },
+          orderBy: { createdAt: 'desc' },
+        }),
+      ]);
+
+      let mrrPaise = 0;
+      for (const s of activeSubs) {
+        mrrPaise +=
+          s.billingCycle === PrismaSubscriptionBillingCycle.YEARLY
+            ? Math.round(s.plan.yearlyPricePaise / 12)
+            : s.plan.monthlyPricePaise;
+      }
+
+      const todayMap = new Map(
+        todayBillsByTenant.map((r) => [
+          r.tenantId,
+          { revenuePaise: r._sum.paidPaise ?? 0, billsCount: r._count._all },
+        ]),
+      );
+      const thirtyMap = new Map(
+        thirtyDayBillsByTenant.map((r) => [
+          r.tenantId,
+          { revenuePaise: r._sum.paidPaise ?? 0, billsCount: r._count._all },
+        ]),
+      );
+
+      let todayRestaurantRevenuePaise = 0;
+      let thirtyDayRestaurantRevenuePaise = 0;
+
+      const restaurantRevenueBreakdown = tenants.map((t) => {
+        const td = todayMap.get(t.id) ?? { revenuePaise: 0, billsCount: 0 };
+        const th = thirtyMap.get(t.id) ?? { revenuePaise: 0, billsCount: 0 };
+        todayRestaurantRevenuePaise += td.revenuePaise;
+        thirtyDayRestaurantRevenuePaise += th.revenuePaise;
+        return {
+          tenantId: t.id,
+          tenantName: t.name,
+          status: t.status,
+          todayRevenuePaise: td.revenuePaise,
+          todayBillsCount: td.billsCount,
+          last30DaysRevenuePaise: th.revenuePaise,
+          last30DaysBillsCount: th.billsCount,
+        };
+      });
+
+      return {
+        summary: {
+          mrrPaise,
+          totalSubscriptionRevenuePaise: paidSubAgg._sum.totalPaise ?? 0,
+          pendingSubscriptionRevenuePaise: pendingSubAgg._sum.totalPaise ?? 0,
+          todayRestaurantRevenuePaise,
+          last30DaysRestaurantRevenuePaise: thirtyDayRestaurantRevenuePaise,
+        },
+        subscriptionInvoices: invoices.map((inv) => ({
+          id: inv.id,
+          invoiceNumber: inv.invoiceNumber,
+          tenantId: inv.tenantId,
+          tenantName: inv.tenant.name,
+          tenantStatus: inv.tenant.status,
+          planId: inv.planId,
+          planName: inv.plan.name,
+          billingCycle: inv.billingCycle,
+          amountPaise: inv.amountPaise,
+          taxPaise: inv.taxPaise,
+          totalPaise: inv.totalPaise,
+          status: inv.status,
+          periodStart: inv.periodStart.toISOString(),
+          periodEnd: inv.periodEnd.toISOString(),
+          paidAt: inv.paidAt?.toISOString() ?? null,
+          paymentRef: inv.paymentRef,
+          notes: inv.notes,
+          createdAt: inv.createdAt.toISOString(),
+        })),
+        restaurantRevenueBreakdown,
+      };
+    });
+  }
+
+  async markInvoicePaid(
+    principal: AuthenticatedPrincipal,
+    invoiceId: string,
+    paymentRef?: string,
+    notes?: string,
+  ) {
+    const ipAddress = this.tenantContext.get()?.ipAddress ?? null;
+
+    return this.prisma.runAsSystemAdmin((db) =>
+      db.$transaction(async (tx) => {
+        const existing = await tx.subscriptionInvoice.findUnique({
+          where: { id: invoiceId },
+          include: { plan: { select: { name: true } } },
+        });
+        if (!existing) {
+          throw new NotFoundException({
+            code: ErrorCode.NOT_FOUND,
+            message: 'Subscription invoice not found.',
+          });
+        }
+
+        const now = new Date();
+        const updated = await tx.subscriptionInvoice.update({
+          where: { id: invoiceId },
+          data: {
+            status: PrismaSubscriptionInvoiceStatus.PAID,
+            paidAt: existing.paidAt ?? now,
+            paymentRef: paymentRef?.trim() || existing.paymentRef || `ADMIN-SETTLED-${now.getTime()}`,
+            notes: notes?.trim() || existing.notes,
+          },
+          include: { plan: { select: { name: true } } },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            tenantId: existing.tenantId,
+            actorUserId: principal.userId,
+            actorRole: principal.role,
+            action: 'SUBSCRIPTION_INVOICE_PAID',
+            entityType: 'SubscriptionInvoice',
+            entityId: invoiceId,
+            beforeJson: { status: existing.status },
+            afterJson: {
+              status: updated.status,
+              paymentRef: updated.paymentRef,
+              totalPaise: updated.totalPaise,
+            },
+            ipAddress,
+          },
+        });
+
+        const dto = this.toInvoiceDto(updated);
+        this.realtimeEvents?.emit({
+          type: 'subscription.updated',
+          tenantId: existing.tenantId,
+          tenantWide: true,
+          payload: {
+            tenantId: existing.tenantId,
+            invoiceId: updated.id,
+            status: updated.status,
+          },
+        });
+        return dto;
+      }),
+    );
   }
 }

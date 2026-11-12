@@ -1,5 +1,5 @@
 import { IsBooleanString, IsEnum, IsISO8601, IsOptional, IsString, MaxLength } from 'class-validator';
-import { KitchenStatus } from '@autonex/shared';
+import { KitchenStation, KitchenStatus } from '@autonex/shared';
 
 export class KdsOrdersQueryDto {
   @IsOptional()
@@ -9,6 +9,10 @@ export class KdsOrdersQueryDto {
   @IsOptional()
   @IsBooleanString()
   includeServed?: string;
+
+  @IsOptional()
+  @IsEnum(KitchenStation)
+  station?: KitchenStation;
 }
 
 export class UpdateKdsStatusDto {

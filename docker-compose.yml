@@ -20,7 +20,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: autonex_redis
-    profiles: ["scale"]
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -43,10 +42,15 @@ services:
       DATABASE_URL: postgresql://autonex_app:autonex_app_pass@postgres:5432/autonex?schema=public
       DATABASE_MIGRATION_URL: postgresql://postgres:postgres@postgres:5432/autonex?schema=public
       DATABASE_ADMIN_URL: postgresql://autonex_admin:autonex_admin_pass@postgres:5432/autonex?schema=public
+      REDIS_URL: redis://redis:6379
+      REDIS_ENABLED: "true"
+      SKIP_REDIS_CONNECT: "false"
     ports:
       - "4000:4000"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   web:

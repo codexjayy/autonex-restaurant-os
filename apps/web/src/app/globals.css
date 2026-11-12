@@ -2,9 +2,30 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #f8fafc;
-  color: #0f172a;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
+@layer base {
+  :root {
+    --background: 40 33% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 24 95% 47%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 36 33% 94%;
+    --secondary-foreground: 222 47% 15%;
+    --muted: 36 20% 94%;
+    --muted-foreground: 215 16% 42%;
+    --accent: 36 45% 92%;
+    --accent-foreground: 222 47% 15%;
+    --destructive: 0 78% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 34 22% 88%;
+    --input: 34 22% 86%;
+    --ring: 24 95% 47%;
+    --radius: 0.75rem;
+  }
 
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}

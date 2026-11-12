@@ -18,17 +18,25 @@ import {
   UpdatePlanDto,
   UpdateSupportCaseDto,
 } from '../subscriptions/dto/subscriptions.dto';
+import { AuthService } from '../auth/auth.service';
+import { ChangePasswordDto } from '../auth/dto/super-admin-auth.dto';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { SupportCasesService } from '../subscriptions/support-cases.service';
 import { AdminService } from './admin.service';
 import {
+  CreateSuperAdminDto,
+  ExtendTrialDto,
+  ListAdminUsersQueryDto,
   ListAuditLogsQueryDto,
   ListSupportCasesQueryDto,
+  MarkInvoicePaidDto,
   OffboardRestaurantDto,
   OnboardRestaurantDto,
   ReactivateRestaurantDto,
+  UpdatePlatformSettingsDto,
+  UpdateUserStatusDto,
 } from './dto/admin-phase7.dto';
-import { ApproveTenantDto, SuspendTenantDto } from './dto/approve-tenant.dto';
+import { ApproveTenantDto, RejectTenantDto, SuspendTenantDto } from './dto/approve-tenant.dto';
 
 @Roles(SYSTEM_ROLE_SUPER_ADMIN)
 @Controller('admin')
@@ -37,7 +45,21 @@ export class AdminController {
     private readonly adminService: AdminService,
     private readonly subscriptionsService: SubscriptionsService,
     private readonly supportCasesService: SupportCasesService,
+    private readonly authService: AuthService,
   ) {}
+
+  @Get('me')
+  getAdminMe(@CurrentUser() principal: AuthenticatedPrincipal) {
+    return this.authService.getUserMe(principal);
+  }
+
+  @Post('security/change-password')
+  changePassword(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.authService.changeSuperAdminPassword(principal, dto);
+  }
 
   @Get('analytics/overview')
   getPlatformOverview() {
@@ -69,6 +91,15 @@ export class AdminController {
     @Body() dto: ApproveTenantDto,
   ) {
     return this.adminService.approveRestaurant(principal, tenantId, dto);
+  }
+
+  @Post('restaurants/:tenantId/reject')
+  rejectRestaurant(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Param('tenantId', new ParseUUIDPipe()) tenantId: string,
+    @Body() dto: RejectTenantDto,
+  ) {
+    return this.adminService.rejectRestaurant(principal, tenantId, dto);
   }
 
   @Post('restaurants/:tenantId/suspend')
@@ -170,5 +201,68 @@ export class AdminController {
   @Get('audit-logs')
   listAuditLogs(@Query() query: ListAuditLogsQueryDto) {
     return this.adminService.listAuditLogs(query);
+  }
+
+  @Post('restaurants/:tenantId/trial/extend')
+  extendRestaurantTrial(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Param('tenantId', new ParseUUIDPipe()) tenantId: string,
+    @Body() dto: ExtendTrialDto,
+  ) {
+    return this.subscriptionsService.extendTrial(principal, tenantId, dto.days, dto.reason);
+  }
+
+  @Get('payments')
+  listAdminPayments() {
+    return this.subscriptionsService.listAdminPayments();
+  }
+
+  @Post('payments/invoices/:invoiceId/mark-paid')
+  markSubscriptionInvoicePaid(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Param('invoiceId', new ParseUUIDPipe()) invoiceId: string,
+    @Body() dto: MarkInvoicePaidDto,
+  ) {
+    return this.subscriptionsService.markInvoicePaid(
+      principal,
+      invoiceId,
+      dto.paymentRef,
+      dto.notes,
+    );
+  }
+
+  @Get('users')
+  listPlatformUsers(@Query() query: ListAdminUsersQueryDto) {
+    return this.adminService.listUsers(query);
+  }
+
+  @Post('users/super-admin')
+  createSuperAdmin(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Body() dto: CreateSuperAdminDto,
+  ) {
+    return this.adminService.createSuperAdminUser(principal, dto);
+  }
+
+  @Patch('users/:userId/status')
+  updatePlatformUserStatus(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: UpdateUserStatusDto,
+  ) {
+    return this.adminService.updateUserStatus(principal, userId, dto);
+  }
+
+  @Get('settings')
+  getPlatformSettings() {
+    return this.adminService.getPlatformSettings();
+  }
+
+  @Patch('settings')
+  updatePlatformSettings(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Body() dto: UpdatePlatformSettingsDto,
+  ) {
+    return this.adminService.updatePlatformSettings(principal, dto);
   }
 }

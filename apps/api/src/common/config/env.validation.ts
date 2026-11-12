@@ -9,6 +9,9 @@ export interface EnvConfig {
   JWT_REFRESH_SECRET: string;
   JWT_ACCESS_TTL: string;
   JWT_REFRESH_TTL_DAYS: number;
+  REDIS_URL: string;
+  REDIS_ENABLED: boolean;
+  SKIP_REDIS_CONNECT: boolean;
   QR_SIGNING_SECRET: string;
   RATE_LIMIT_TTL_SEC: number;
   RATE_LIMIT_MAX_REQ: number;
@@ -71,6 +74,11 @@ export function validateEnv(raw: Record<string, unknown>): EnvConfig {
     JWT_REFRESH_SECRET: requiredString('JWT_REFRESH_SECRET', 'test_refresh_secret_min_32_characters_long_002'),
     JWT_ACCESS_TTL: String(raw.JWT_ACCESS_TTL ?? '15m'),
     JWT_REFRESH_TTL_DAYS: Number(raw.JWT_REFRESH_TTL_DAYS ?? 7),
+    REDIS_URL: optionalString('REDIS_URL') ?? 'redis://127.0.0.1:6379',
+    REDIS_ENABLED:
+      raw.REDIS_ENABLED === 'true' ||
+      (!isTest && raw.REDIS_ENABLED !== 'false' && raw.SKIP_REDIS_CONNECT !== 'true'),
+    SKIP_REDIS_CONNECT: raw.SKIP_REDIS_CONNECT === 'true' || isTest,
     QR_SIGNING_SECRET: requiredString(
       'QR_SIGNING_SECRET',
       'test_qr_signing_secret_min_32_characters_long_003',

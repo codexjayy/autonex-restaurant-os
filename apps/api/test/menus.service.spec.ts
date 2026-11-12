@@ -3,7 +3,14 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { ConflictException, BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DietaryType, ErrorCode, SelectionType, StaffRole, TenantStatus } from '@autonex/shared';
+import {
+  DietaryType,
+  ErrorCode,
+  SelectionType,
+  StaffRole,
+  TaxMode,
+  TenantStatus,
+} from '@autonex/shared';
 import sharp from 'sharp';
 import { TenantContextService } from '../src/common/context/tenant-context.service';
 import { AuthenticatedPrincipal } from '../src/common/decorators/current-user.decorator';
@@ -175,6 +182,8 @@ describe('MenusService & MediaService (Phase 2)', () => {
         name: 'Butter Naan',
         dietaryType: DietaryType.VEG,
         basePricePaise: 5500,
+        prepTimeMinutes: 12,
+        gstRateBps: 500,
         modifierGroups: [
           {
             name: 'Toppings',
@@ -187,6 +196,8 @@ describe('MenusService & MediaService (Phase 2)', () => {
       const createCall = mockTx.menuItem.create.mock.calls[0]?.[0] as {
         data: {
           tenantId: string;
+          prepTimeMinutes?: number | null;
+          gstRateBps?: number | null;
           modifierGroups?: {
             create: Array<{
               tenant: { connect: { id: string } };
@@ -197,6 +208,8 @@ describe('MenusService & MediaService (Phase 2)', () => {
       };
 
       expect(createCall.data.tenantId).toBe(principal.tenantId);
+      expect(createCall.data.prepTimeMinutes).toBe(12);
+      expect(createCall.data.gstRateBps).toBe(500);
       expect(createCall.data.modifierGroups?.create[0]?.tenant.connect.id).toBe(principal.tenantId);
       expect(createCall.data.modifierGroups?.create[0]?.options.create[0]?.tenantId).toBe(
         principal.tenantId,
@@ -239,9 +252,23 @@ describe('MenusService & MediaService (Phase 2)', () => {
 
       const updated = await service.updateMenuItem(principal, itemId, {
         basePricePaise: 12500,
+        prepTimeMinutes: 15,
+        gstRateBps: 1200,
+        taxMode: TaxMode.INCLUSIVE,
       });
 
+      const updateCall = mockTx.menuItem.update.mock.calls[0]?.[0] as {
+        data: {
+          prepTimeMinutes?: number | null;
+          gstRateBps?: number | null;
+          taxMode?: string | null;
+        };
+      };
+
       expect(updated.basePricePaise).toBe(12500);
+      expect(updateCall.data.prepTimeMinutes).toBe(15);
+      expect(updateCall.data.gstRateBps).toBe(1200);
+      expect(updateCall.data.taxMode).toBe('INCLUSIVE');
       expect(auditLogs[0]?.action).toBe('MENU_ITEM_PRICE_UPDATED');
       expect(auditLogs[0]?.beforeJson).toMatchObject({ basePricePaise: 11000 });
       expect(auditLogs[0]?.afterJson).toMatchObject({ basePricePaise: 12500 });

@@ -1,125 +1,30 @@
+import {
+  applyTenantQueryGuard as applySharedTenantQueryGuard,
+  createTenantScopedExtension as createSharedTenantScopedExtension,
+  Prisma,
+  PrismaClient,
+  TENANT_SCOPED_MODELS,
+  type TenantQueryParams as SharedTenantQueryParams,
+} from '@autonex/database';
 import { ForbiddenException, Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma, PrismaClient } from '@prisma/client';
 import { ErrorCode } from '@autonex/shared';
 import { TenantContextService } from '../context/tenant-context.service';
 import { isValidUuid } from '../security/crypto.util';
 
-const TENANT_SCOPED_MODELS = new Set([
-  'Outlet',
-  'Membership',
-  'RefreshToken',
-  'AuditLog',
-  'Category',
-  'MenuItem',
-  'ModifierGroup',
-  'ModifierOption',
-  'RestaurantTable',
-  'TableQrToken',
-  'DiningSession',
-  'SessionGuest',
-  'Order',
-  'OrderItem',
-  'OrderEvent',
-  'OutboxEvent',
-]);
+export { TENANT_SCOPED_MODELS };
 
-export interface TenantQueryParams {
-  tenantId: string;
-  model?: string;
-  operation: string;
-  args: unknown;
-  query: (args: unknown) => Promise<unknown>;
+export type TenantQueryParams = Omit<SharedTenantQueryParams, 'createError'>;
+
+function forbiddenFactory(code: string, message: string): ForbiddenException {
+  return new ForbiddenException({ code, message });
 }
 
-export async function applyTenantQueryGuard({
-  tenantId,
-  model,
-  operation,
-  args,
-  query,
-}: TenantQueryParams): Promise<unknown> {
-  if (!isValidUuid(tenantId)) {
-    throw new ForbiddenException({
-      code: ErrorCode.TENANT_CONTEXT_MISSING,
-      message: 'Valid tenantId UUID is required for tenant-scoped queries',
-    });
-  }
-
-  if (!model || !TENANT_SCOPED_MODELS.has(model)) {
-    if (model === 'Tenant') {
-      const mutableArgs = (args ?? {}) as Record<string, unknown>;
-      const where = (mutableArgs.where ?? {}) as Record<string, unknown>;
-      if (where.id !== undefined && where.id !== tenantId) {
-        throw new ForbiddenException({
-          code: ErrorCode.FORBIDDEN,
-          message: 'Cross-tenant Tenant access blocked by app isolation layer',
-        });
-      }
-      mutableArgs.where = { ...where, id: tenantId };
-      return query(mutableArgs);
-    }
-    return query(args);
-  }
-
-  const mutableArgs = (args ?? {}) as Record<string, unknown>;
-
-  const enforceWritePayload = (item: Record<string, unknown>) => {
-    if (item.tenantId !== undefined && item.tenantId !== tenantId) {
-      throw new ForbiddenException({
-        code: ErrorCode.FORBIDDEN,
-        message: `Cross-tenant write rejected on ${model}`,
-      });
-    }
-    return { ...item, tenantId };
-  };
-
-  if (operation === 'create' || operation === 'createMany') {
-    if (Array.isArray(mutableArgs.data)) {
-      mutableArgs.data = mutableArgs.data.map((d) =>
-        enforceWritePayload(d as Record<string, unknown>),
-      );
-    } else if (mutableArgs.data && typeof mutableArgs.data === 'object') {
-      mutableArgs.data = enforceWritePayload(mutableArgs.data as Record<string, unknown>);
-    }
-    return query(mutableArgs);
-  }
-
-  const where = (mutableArgs.where ?? {}) as Record<string, unknown>;
-  if (where.tenantId !== undefined && where.tenantId !== tenantId) {
-    throw new ForbiddenException({
-      code: ErrorCode.FORBIDDEN,
-      message: `Cross-tenant query rejected on ${model}`,
-    });
-  }
-
-  if (operation === 'upsert') {
-    if (mutableArgs.create && typeof mutableArgs.create === 'object') {
-      mutableArgs.create = enforceWritePayload(mutableArgs.create as Record<string, unknown>);
-    }
-    if (mutableArgs.update && typeof mutableArgs.update === 'object') {
-      mutableArgs.update = enforceWritePayload(mutableArgs.update as Record<string, unknown>);
-    }
-  }
-
-  if (operation === 'findUnique' || operation === 'findUniqueOrThrow') {
-    const result = await query(mutableArgs);
-    if (
-      result &&
-      typeof result === 'object' &&
-      'tenantId' in result &&
-      (result as { tenantId?: unknown }).tenantId !== tenantId
-    ) {
-      throw new ForbiddenException({
-        code: ErrorCode.FORBIDDEN,
-        message: `Cross-tenant read rejected on ${model}`,
-      });
-    }
-    return result;
-  }
-
-  mutableArgs.where = { ...where, tenantId };
-  return query(mutableArgs);
+export async function applyTenantQueryGuard(params: TenantQueryParams): Promise<unknown> {
+  return applySharedTenantQueryGuard({
+    ...params,
+    createError: forbiddenFactory,
+  });
 }
 
 export function createTenantScopedExtension(tenantId: string) {
@@ -130,22 +35,7 @@ export function createTenantScopedExtension(tenantId: string) {
     });
   }
 
-  return Prisma.defineExtension({
-    name: 'tenant-isolation-guard',
-    query: {
-      $allModels: {
-        async $allOperations({ model, operation, args, query }) {
-          return applyTenantQueryGuard({
-            tenantId,
-            model,
-            operation,
-            args,
-            query: query as (a: unknown) => Promise<unknown>,
-          });
-        },
-      },
-    },
-  });
+  return createSharedTenantScopedExtension(tenantId, forbiddenFactory);
 }
 
 @Injectable()
@@ -192,12 +82,13 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    return this.appClient.$transaction(async (rawTx) => {
-      await rawTx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`;
-      const scopedTx = (rawTx as unknown as PrismaClient).$extends(
-        createTenantScopedExtension(tenantId),
-      ) as unknown as Prisma.TransactionClient;
-      return fn(scopedTx);
+    const scopedClient = this.appClient.$extends(
+      createTenantScopedExtension(tenantId),
+    ) as unknown as PrismaClient;
+
+    return scopedClient.$transaction(async (scopedTx) => {
+      await scopedTx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`;
+      return fn(scopedTx as unknown as Prisma.TransactionClient);
     });
   }
 

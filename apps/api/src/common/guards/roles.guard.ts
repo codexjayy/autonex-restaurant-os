@@ -1,6 +1,6 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { ActorRole, ErrorCode } from '@autonex/shared';
+import { ActorRole, ErrorCode, SYSTEM_ROLE_SUPER_ADMIN } from '@autonex/shared';
 import { AuthenticatedPrincipal } from '../decorators/current-user.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { ROLES_KEY } from '../decorators/roles.decorator';
@@ -30,6 +30,17 @@ export class RolesGuard implements CanActivate {
       throw new ForbiddenException({
         code: ErrorCode.FORBIDDEN,
         message: 'Insufficient role permissions for this resource',
+      });
+    }
+
+    if (
+      requiredRoles.includes(SYSTEM_ROLE_SUPER_ADMIN) &&
+      user.role === SYSTEM_ROLE_SUPER_ADMIN &&
+      !user.isSuperAdmin
+    ) {
+      throw new ForbiddenException({
+        code: ErrorCode.FORBIDDEN,
+        message: 'Super Admin privileges required for this resource',
       });
     }
 

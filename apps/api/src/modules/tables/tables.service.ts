@@ -5,8 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DiningSessionStatus, ErrorCode } from '@autonex/shared';
-import type { Prisma } from '@prisma/client';
+import { DiningSessionStatus, ErrorCode, TableStatus } from '@autonex/shared';
+import type { Prisma, TableStatus as PrismaTableStatus } from '@prisma/client';
 import { TenantContextService } from '../../common/context/tenant-context.service';
 import {
   AuthenticatedPrincipal,
@@ -40,6 +40,15 @@ export interface ResolvedQrTable {
 
 const RAW_QR_TOKEN_REGEX = /^[A-Za-z0-9_-]{20,128}$/;
 
+function sortTablesNaturally<T extends { tableNumber: string }>(tables: readonly T[]): T[] {
+  return [...tables].sort((a, b) =>
+    a.tableNumber.localeCompare(b.tableNumber, undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    }),
+  );
+}
+
 @Injectable()
 export class TablesService {
   constructor(
@@ -65,6 +74,7 @@ export class TablesService {
       id: string;
       tableNumber: string;
       label: string | null;
+      floorSection?: string | null;
       capacity: number;
       status: string;
       isActive: boolean;
@@ -101,6 +111,7 @@ export class TablesService {
       id: table.id,
       tableNumber: table.tableNumber,
       label: table.label,
+      floorSection: table.floorSection ?? null,
       capacity: table.capacity,
       status: table.status,
       isActive: table.isActive,
@@ -150,24 +161,55 @@ export class TablesService {
         },
       });
 
-      return tables.map((t) => this.serializeTableWithQr(t));
+      return sortTablesNaturally(tables).map((t) => this.serializeTableWithQr(t));
     }, ctx.tenantId);
   }
 
   async createTable(principal: AuthenticatedPrincipal, dto: CreateTableDto) {
     const ctx = requireOutletContext(principal);
     const ipAddress = this.tenantContext.get()?.ipAddress ?? null;
+    const normalizedTableNumber = dto.tableNumber.trim();
+
+    if (!normalizedTableNumber) {
+      throw new BadRequestException({
+        code: ErrorCode.VALIDATION_ERROR,
+        message: 'Table number is required.',
+      });
+    }
+
+    if (dto.status === TableStatus.BILL_REQUESTED) {
+      throw new BadRequestException({
+        code: ErrorCode.VALIDATION_ERROR,
+        message: 'Table status must be Available, Occupied, or Reserved.',
+      });
+    }
 
     return this.prisma.runInTenantTx(async (tx) => {
+      const duplicate = await tx.restaurantTable.findFirst({
+        where: {
+          outletId: ctx.outletId,
+          tableNumber: { equals: normalizedTableNumber, mode: 'insensitive' },
+        },
+        select: { id: true },
+      });
+      if (duplicate) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: `Table "${normalizedTableNumber}" already exists in this outlet.`,
+        });
+      }
+
       let table;
       try {
         table = await tx.restaurantTable.create({
           data: {
             tenantId: ctx.tenantId,
             outletId: ctx.outletId,
-            tableNumber: dto.tableNumber.trim(),
+            tableNumber: normalizedTableNumber,
             label: dto.label?.trim() || null,
+            floorSection: dto.floorSection?.trim() || null,
             capacity: dto.capacity ?? 4,
+            status: (dto.status as PrismaTableStatus | undefined) ?? 'AVAILABLE',
             isActive: dto.isActive ?? true,
           },
         });
@@ -175,7 +217,7 @@ export class TablesService {
         if ((err as { code?: string })?.code === 'P2002') {
           throw new ConflictException({
             code: ErrorCode.CONFLICT,
-            message: `Table "${dto.tableNumber.trim()}" already exists in this outlet.`,
+            message: `Table "${normalizedTableNumber}" already exists in this outlet.`,
           });
         }
         throw err;
@@ -193,6 +235,8 @@ export class TablesService {
           entityId: table.id,
           afterJson: {
             tableNumber: table.tableNumber,
+            floorSection: table.floorSection,
+            status: table.status,
             capacity: table.capacity,
             qrVersion: qrToken.qrVersion,
           },
@@ -222,14 +266,68 @@ export class TablesService {
         });
       }
 
+      const normalizedTableNumber =
+        dto.tableNumber !== undefined ? dto.tableNumber.trim() : undefined;
+      if (normalizedTableNumber !== undefined) {
+        if (!normalizedTableNumber) {
+          throw new BadRequestException({
+            code: ErrorCode.VALIDATION_ERROR,
+            message: 'Table number cannot be blank.',
+          });
+        }
+
+        const duplicate = await tx.restaurantTable.findFirst({
+          where: {
+            outletId: ctx.outletId,
+            id: { not: existing.id },
+            tableNumber: { equals: normalizedTableNumber, mode: 'insensitive' },
+          },
+          select: { id: true },
+        });
+        if (duplicate) {
+          throw new ConflictException({
+            code: ErrorCode.CONFLICT,
+            message: `Table "${normalizedTableNumber}" already exists in this outlet.`,
+          });
+        }
+      }
+
+      if (dto.status !== undefined && dto.status !== existing.status) {
+        if (dto.status === TableStatus.BILL_REQUESTED) {
+          throw new BadRequestException({
+            code: ErrorCode.VALIDATION_ERROR,
+            message: 'Table status must be Available, Occupied, or Reserved.',
+          });
+        }
+        if (dto.status !== TableStatus.OCCUPIED) {
+          const activeSession = await tx.diningSession.findFirst({
+            where: {
+              tableId: existing.id,
+              status: { not: DiningSessionStatus.CLOSED },
+            },
+            select: { id: true },
+          });
+          if (activeSession) {
+            throw new ConflictException({
+              code: ErrorCode.CONFLICT,
+              message: `Table "${existing.tableNumber}" has a live dining session. Close or reset it before changing table status.`,
+            });
+          }
+        }
+      }
+
       let updated;
       try {
         updated = await tx.restaurantTable.update({
           where: { id: existing.id },
           data: {
-            ...(dto.tableNumber !== undefined ? { tableNumber: dto.tableNumber.trim() } : {}),
+            ...(normalizedTableNumber !== undefined ? { tableNumber: normalizedTableNumber } : {}),
             ...(dto.label !== undefined ? { label: dto.label?.trim() || null } : {}),
+            ...(dto.floorSection !== undefined
+              ? { floorSection: dto.floorSection?.trim() || null }
+              : {}),
             ...(dto.capacity !== undefined ? { capacity: dto.capacity } : {}),
+            ...(dto.status !== undefined ? { status: dto.status as PrismaTableStatus } : {}),
             ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
           },
           include: {
@@ -244,7 +342,7 @@ export class TablesService {
         if ((err as { code?: string })?.code === 'P2002') {
           throw new ConflictException({
             code: ErrorCode.CONFLICT,
-            message: `Table "${dto.tableNumber?.trim()}" already exists in this outlet.`,
+            message: `Table "${normalizedTableNumber ?? existing.tableNumber}" already exists in this outlet.`,
           });
         }
         throw err;
@@ -260,11 +358,15 @@ export class TablesService {
           entityId: updated.id,
           beforeJson: {
             tableNumber: existing.tableNumber,
+            floorSection: existing.floorSection ?? null,
+            status: existing.status,
             capacity: existing.capacity,
             isActive: existing.isActive,
           },
           afterJson: {
             tableNumber: updated.tableNumber,
+            floorSection: updated.floorSection ?? null,
+            status: updated.status,
             capacity: updated.capacity,
             isActive: updated.isActive,
           },
@@ -386,7 +488,31 @@ export class TablesService {
         });
       }
 
-      await tx.restaurantTable.delete({ where: { id: table.id } });
+      const activeSession = await tx.diningSession.findFirst({
+        where: {
+          tableId: table.id,
+          status: { not: DiningSessionStatus.CLOSED },
+        },
+        select: { id: true },
+      });
+      if (activeSession) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: `Table "${table.tableNumber}" has an active dining session. Settle and close it before deleting.`,
+        });
+      }
+
+      try {
+        await tx.restaurantTable.delete({ where: { id: table.id } });
+      } catch (err) {
+        if ((err as { code?: string })?.code === 'P2003') {
+          throw new ConflictException({
+            code: ErrorCode.CONFLICT,
+            message: `Table "${table.tableNumber}" has past dining/billing history and cannot be removed permanently. Mark it Inactive instead.`,
+          });
+        }
+        throw err;
+      }
 
       await tx.auditLog.create({
         data: {
@@ -487,9 +613,7 @@ export class TablesService {
       const secret = this.getQrSecret();
       const appUrl = this.getAppUrl();
 
-      return tables
-        .filter((t) => t.qrTokens.length > 0)
-        .map((t) => {
+      return sortTablesNaturally(tables.filter((t) => t.qrTokens.length > 0)).map((t) => {
           const activeToken = t.qrTokens[0]!;
           const rawToken = decryptQrToken(activeToken.tokenEnc, secret);
           return {
@@ -570,6 +694,9 @@ export class TablesService {
                 description: true,
                 dietaryType: true,
                 basePricePaise: true,
+                prepTimeMinutes: true,
+                gstRateBps: true,
+                taxMode: true,
                 imageUrl: true,
                 inStock: true,
                 sortOrder: true,
@@ -617,7 +744,9 @@ export class TablesService {
     }, resolved.tenant_id);
 
     const orderingBlocked =
-      resolved.tenant_status === 'LOCKED' || resolved.tenant_status === 'SUSPENDED';
+      resolved.tenant_status === 'LOCKED' ||
+      resolved.tenant_status === 'SUSPENDED' ||
+      resolved.tenant_status === 'REJECTED';
 
     return {
       restaurant: {

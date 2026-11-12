@@ -11,36 +11,47 @@ Multi-tenant QR ordering, real-time Kitchen Display (KDS), and GST/UPI billing O
 ## Quick Start
 
 ```bash
-cp .env.example .env && pnpm install
-docker compose up -d postgres
-pnpm db:generate && pnpm db:migrate && pnpm db:seed
-pnpm dev
+- cp .env.example .env && pnpm install
+- docker compose up -d postgres redis
++ cp .env.example .env && pnpm install
++ docker compose up -d postgres redis
+- pnpm db:generate && pnpm db:migrate && pnpm db:seed
++ pnpm db:generate && pnpm db:deploy && pnpm db:seed
+  pnpm dev
 ```
 
-For RLS role setup, Docker full-stack mode, and troubleshooting, see [setup.md](./setup.md).
+For RLS role setup, Docker full-stack mode, and troubleshooting, see [setup.md](./setup.md) and [docs/architecture/system-architecture.md](./docs/architecture/system-architecture.md).
 
 ## Documentation
 
-- [Product Requirements (PRD)](./prd.md) · [System Architecture](./architecture.md) · [90-Day Execution Plan](./plan.md)
-- [Database Design](./database.md) · [API & WebSocket Contract](./api.md) · [Local & Docker Setup](./setup.md)
-- [Prisma Schema](./prisma/schema.prisma) · [PostgreSQL RLS Policies](./prisma/rls-policies.sql)
+- [Product Requirements (PRD)](./prd.md) · [System Architecture](./docs/architecture/system-architecture.md) · [90-Day Execution Plan](./plan.md)
+- [Database Design](./docs/database/schema.md) · [Authentication & Sessions](./docs/security/authentication.md) · [Tenant Isolation & RLS](./docs/security/tenant-isolation.md)
+- [Milestone 1 Audit](./docs/audit/milestone-1-audit.md) · [Milestone 1 Completion Report](./docs/product/milestone-1-completion.md)
+- [API Contract](./api.md) · [Local & Docker Setup](./setup.md) · [Prisma Schema](./prisma/schema.prisma) · [PostgreSQL RLS Policies](./prisma/rls-policies.sql)
 
 ## Project Structure
 
 ```text
 autonex-restaurant-os/
 ├── apps/
-│   ├── web/         # Next.js (Customer QR, Waiter POS, KDS, Owner, Admin)
-│   └── api/         # NestJS Modular Monolith (11 domain modules + Outbox Relay)
-├── packages/shared/ # Shared DTOs, enums, and paise/GST helpers
-├── prisma/          # schema.prisma, rls-policies.sql, migrations, seed.ts
-└── *.md             # PRD, architecture, plan, database, API & setup docs
+│   ├── web/                # Next.js App Router (Auth, Onboarding, Team, Outlets, Settings, Floor/KDS)
+│   └── api/                # NestJS Modular Monolith (REST API, RBAC, Auth, Outbox Relay)
+├── packages/
+│   ├── types/              # Shared API contracts, pagination & DTO interfaces
+│   ├── permissions/        # Canonical RBAC permission catalog & role mappings
+│   ├── validation/         # Shared Zod schemas (Indian phone, PIN, GSTIN, auth, tenants)
+│   ├── auth/               # Argon2id password/PIN hashing, JWT, HMAC-SHA256 tokens
+│   ├── database/           # Prisma singleton, tenant query guard & CLS context
+│   ├── ui/                 # Shared Tailwind + Radix UI primitives
+│   └── shared/             # Domain enums, paise/GST math helpers, legacy compat
+├── prisma/                 # schema.prisma, migrations, rls-policies.sql, seed.ts
+└── docs/                   # Architecture, database, security & milestone reports
 ```
 
 ## Contributing
 
 - Fork or branch off `main` (`feat/<module>-<short-desc>` or `fix/<issue>`).
-- Run `pnpm lint`, `pnpm typecheck`, and `pnpm --filter api test:rls` before opening a PR.
+- Run `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and `pnpm --filter @autonex/api test:rls` before opening a PR.
 - Keep `prisma/schema.prisma`, `database.md`, and `api.md` updated with any schema or contract changes.
 
 ## License

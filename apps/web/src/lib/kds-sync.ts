@@ -1,4 +1,9 @@
-export type KdsConnectionMode = 'LIVE_WS' | 'POLLING_FALLBACK' | 'OFFLINE';
+export type KdsConnectionMode =
+  | 'CONNECTING'
+  | 'LIVE_WS'
+  | 'POLLING_FALLBACK'
+  | 'OFFLINE'
+  | 'BLOCKED';
 
 export {
   applyKdsEventToState,

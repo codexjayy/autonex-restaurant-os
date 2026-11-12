@@ -26,9 +26,22 @@ export class TenancyController {
 
   @AllowPendingTenant()
   @Roles(StaffRole.OWNER, StaffRole.MANAGER)
-  @Get('onboarding')
+  @Get(['onboarding', 'checklist'])
   getOnboarding(@CurrentUser() principal: AuthenticatedPrincipal) {
     return this.tenancyService.getOnboardingChecklist(principal);
+  }
+
+  @AllowPendingTenant()
+  @Roles(
+    StaffRole.OWNER,
+    StaffRole.MANAGER,
+    StaffRole.CASHIER,
+    StaffRole.WAITER,
+    StaffRole.KITCHEN,
+  )
+  @Get('overview')
+  getWorkspaceOverview(@CurrentUser() principal: AuthenticatedPrincipal) {
+    return this.tenancyService.getWorkspaceOverview(principal);
   }
 }
 

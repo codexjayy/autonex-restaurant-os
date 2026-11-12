@@ -1,5 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import { ForbiddenException } from '@nestjs/common';
+import { createTenantScopedExtension } from '../src/common/prisma/prisma.service';
 
 describe('PostgreSQL Live RLS Cross-Tenant Isolation', () => {
   const adminDb = new PrismaClient({
@@ -73,6 +75,43 @@ describe('PostgreSQL Live RLS Cross-Tenant Isolation', () => {
         });
       }),
     ).rejects.toThrow();
+  });
+
+  it('prevents cross-tenant reads on Milestone 1 tables (tenant_settings, outlet_settings, invitations, sessions)', async () => {
+    const crossReads = await appDb.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantAId}, true)`;
+      const [ts, os, inv, sess] = await Promise.all([
+        tx.tenantSettings.findMany({ where: { tenantId: tenantBId } }),
+        tx.outletSettings.findMany({ where: { tenantId: tenantBId } }),
+        tx.invitation.findMany({ where: { tenantId: tenantBId } }),
+        tx.session.findMany({ where: { tenantId: tenantBId } }),
+      ]);
+      return { ts, os, inv, sess };
+    });
+
+    expect(crossReads.ts).toHaveLength(0);
+    expect(crossReads.os).toHaveLength(0);
+    expect(crossReads.inv).toHaveLength(0);
+    expect(crossReads.sess).toHaveLength(0);
+  });
+
+  it('enforces Layer 1 extension and Layer 2 PostgreSQL RLS together via client.$extends().$transaction()', async () => {
+    const scopedClient = appDb.$extends(createTenantScopedExtension(tenantAId));
+
+    const visibleToA = await scopedClient.$transaction(async (scopedTx) => {
+      await scopedTx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantAId}, true)`;
+      return scopedTx.outlet.findMany();
+    });
+
+    expect(visibleToA).toHaveLength(1);
+    expect(visibleToA[0]?.id).toBe(outletAId);
+
+    await expect(
+      scopedClient.$transaction(async (scopedTx) => {
+        await scopedTx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantAId}, true)`;
+        return scopedTx.outlet.findMany({ where: { tenantId: tenantBId } });
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
 

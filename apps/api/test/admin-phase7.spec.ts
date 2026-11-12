@@ -374,5 +374,101 @@ describe('Admin Phase 7 — Mid-Meal Safe Suspension Drain, On/Offboarding, RBAC
     // Unused metadata import check to ensure decorator key constant stays aligned
     expect(ALLOW_DURING_LOCK_KEY).toBe('allowDuringLockOrSettlement');
   });
+
+  it('rejects a restaurant, revokes sessions/tokens, blocks REJECTED access in TenantStatusGuard, and supports approval clearing rejection', async () => {
+    let status = TenantStatus.PENDING_APPROVAL;
+    let rejectionReason: string | null = null;
+    const revokedTokens: Array<Record<string, unknown>> = [];
+    const revokedSessions: Array<Record<string, unknown>> = [];
+    const auditLogs: Array<Record<string, unknown>> = [];
+
+    const txMock = {
+      tenant: {
+        findUnique: jest.fn(async () => ({
+          id: tenantId,
+          status,
+          rejectionReason,
+        })),
+        update: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          if (typeof data.status === 'string') status = data.status as TenantStatus;
+          if ('rejectionReason' in data) {
+            rejectionReason = (data.rejectionReason as string | null) ?? null;
+          }
+          return {
+            id: tenantId,
+            status,
+            rejectionReason,
+          };
+        }),
+      },
+      subscription: {
+        findUnique: jest.fn(async () => null),
+      },
+      refreshToken: {
+        updateMany: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          revokedTokens.push(data);
+          return { count: 2 };
+        }),
+      },
+      session: {
+        updateMany: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          revokedSessions.push(data);
+          return { count: 1 };
+        }),
+      },
+      auditLog: {
+        create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          auditLogs.push(data);
+          return data;
+        }),
+      },
+    };
+    const dbMock = {
+      ...txMock,
+      $transaction: jest.fn(async (cb: (tx: typeof txMock) => Promise<unknown>) => cb(txMock)),
+    };
+    const prismaMock = {
+      runAsSystemAdmin: jest.fn(async (cb: (db: typeof dbMock) => Promise<unknown>) => cb(dbMock)),
+    } as unknown as PrismaService;
+
+    const adminService = new AdminService(prismaMock, new TenantContextService());
+    const rejected = await adminService.rejectRestaurant(superAdminPrincipal, tenantId, {
+      reason: 'Missing FSSAI certificate',
+    });
+    expect(rejected.status).toBe(TenantStatus.REJECTED);
+    expect(revokedTokens.length).toBe(1);
+    expect(revokedSessions.length).toBe(1);
+    expect(auditLogs.some((a) => a.action === 'RESTAURANT_REJECTED')).toBe(true);
+
+    const reflector = new Reflector();
+    const tenantStatusGuard = new TenantStatusGuard(reflector);
+    const rejectedOwnerCtx = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          method: 'GET',
+          user: {
+            userId: 'owner-1',
+            tenantId,
+            outletId,
+            role: StaffRole.OWNER,
+            isSuperAdmin: false,
+            tenantStatus: TenantStatus.REJECTED,
+          },
+        }),
+      }),
+      getHandler: () => ({}),
+      getClass: () => ({}),
+    } as unknown as ExecutionContext;
+    expect(() => tenantStatusGuard.canActivate(rejectedOwnerCtx)).toThrow(ForbiddenException);
+
+    // Approving later clears rejection and moves to ACTIVE
+    const approved = await adminService.approveRestaurant(superAdminPrincipal, tenantId, {
+      targetStatus: 'ACTIVE',
+      note: 'Documents re-submitted and verified',
+    });
+    expect(approved.status).toBe(TenantStatus.ACTIVE);
+    expect(approved.rejectionReason).toBeNull();
+    expect(auditLogs.some((a) => a.action === 'RESTAURANT_APPROVED')).toBe(true);
+  });
 });
 

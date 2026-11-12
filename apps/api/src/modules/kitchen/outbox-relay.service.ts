@@ -1,4 +1,5 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { RealtimeEventsService } from '../../common/realtime/realtime-events.service';
 import {
   DietaryType,
   DiningSessionStatus,
@@ -17,7 +18,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { StructuredLoggerService } from '../../common/logging/structured-logger.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { KitchenGateway } from './kitchen.gateway';
-import { serializeKdsTicket } from './kitchen.service';
+import { KDS_TICKET_INCLUDE, serializeKdsTicket } from './kitchen.service';
 
 export interface ClaimedOutboxRow {
   id: string;
@@ -44,6 +45,7 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kitchenGateway: KitchenGateway,
+    @Optional() private readonly realtimeEvents?: RealtimeEventsService,
   ) {}
 
   onModuleInit(): void {
@@ -152,21 +154,7 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
       const order = await this.prisma.runAsSystemAdmin((adminDb) =>
         adminDb.order.findFirst({
           where: { id: row.aggregateId, tenantId: row.tenantId },
-          include: {
-            session: {
-              select: {
-                id: true,
-                table: { select: { id: true, tableNumber: true, label: true } },
-              },
-            },
-            acknowledgedByMembership: {
-              select: {
-                id: true,
-                user: { select: { name: true } },
-              },
-            },
-            items: { orderBy: { createdAt: 'asc' } },
-          },
+          include: KDS_TICKET_INCLUDE,
         }),
       );
       if (order) {
@@ -296,6 +284,18 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
             };
 
             this.kitchenGateway.emitKdsEvent(envelope);
+            this.realtimeEvents?.emit({
+              type: row.topic === 'order.created' ? 'order.created' : 'order.updated',
+              tenantId: row.tenantId,
+              outletId: ticket.outletId,
+              payload: {
+                topic: row.topic,
+                orderId: ticket.id,
+                kotNumber: ticket.kotNumber,
+                tableNumber: ticket.tableNumber,
+                kitchenStatus: ticket.kitchenStatus,
+              },
+            });
           } else if (row.topic === 'session.updated' || row.topic === 'session.closed') {
             const payload = (row.payloadJson ?? {}) as Record<string, unknown>;
             const outletId = typeof payload.outletId === 'string' ? payload.outletId : '';
@@ -344,6 +344,16 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
               payload,
               createdAt:
                 row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+            });
+            this.realtimeEvents?.emit({
+              type: 'payment.updated',
+              tenantId: row.tenantId,
+              outletId,
+              payload: {
+                topic: row.topic,
+                aggregateId: row.aggregateId,
+                ...payload,
+              },
             });
           }
 

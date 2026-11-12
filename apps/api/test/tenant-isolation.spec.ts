@@ -7,7 +7,11 @@ import { TenantContextService } from '../src/common/context/tenant-context.servi
 import { JwtAuthGuard } from '../src/common/guards/jwt-auth.guard';
 import { RolesGuard } from '../src/common/guards/roles.guard';
 import { TenantStatusGuard } from '../src/common/guards/tenant-status.guard';
-import { applyTenantQueryGuard, createTenantScopedExtension } from '../src/common/prisma/prisma.service';
+import {
+  applyTenantQueryGuard,
+  createTenantScopedExtension,
+  PrismaService,
+} from '../src/common/prisma/prisma.service';
 
 const TENANT_A = '11111111-1111-4111-8111-111111111111';
 const TENANT_B = '22222222-2222-4222-8222-222222222222';
@@ -233,6 +237,35 @@ describe('Cross-Tenant Isolation & Security Guards', () => {
         query: fakeQuery,
       }),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('extends appClient before starting $transaction in runInTenantTx (no rawTx.$extends call)', async () => {
+    const configMock = {
+      get: () => 'postgresql://autonex_app:dev@localhost:5432/autonex',
+    } as unknown as ConfigService;
+    const ctxService = new TenantContextService();
+    const prismaService = new PrismaService(configMock, ctxService);
+
+    const execRawMock = jest.fn(async () => 1);
+    // Simulate real Prisma TransactionClient where $extends does NOT exist on tx
+    const scopedTx = { $executeRaw: execRawMock };
+    const transactionMock = jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(scopedTx));
+    const extendsMock = jest.fn(() => ({ $transaction: transactionMock }));
+
+    Object.defineProperty(prismaService, 'appClient', {
+      value: { $extends: extendsMock },
+      writable: true,
+    });
+
+    const result = await prismaService.runInTenantTx(async (tx) => {
+      expect(tx).toBe(scopedTx);
+      return 'ok';
+    }, TENANT_A);
+
+    expect(result).toBe('ok');
+    expect(extendsMock).toHaveBeenCalledTimes(1);
+    expect(transactionMock).toHaveBeenCalledTimes(1);
+    expect(execRawMock).toHaveBeenCalledTimes(1);
   });
 });
 

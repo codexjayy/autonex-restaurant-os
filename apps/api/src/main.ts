@@ -49,7 +49,8 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  await app.listen(port, '0.0.0.0');
+  // Listen dual-stack so both http://[::1]:4000 and http://127.0.0.1:4000 work cleanly for localhost clients
+  await app.listen(port);
   logger.log(`AutoNex API listening on port ${port}`, 'Bootstrap');
 }
 

@@ -17,3 +17,9 @@ export class SuspendTenantDto {
   reason!: string;
 }
 
+export class RejectTenantDto {
+  @IsString()
+  @Length(5, 300)
+  reason!: string;
+}
+

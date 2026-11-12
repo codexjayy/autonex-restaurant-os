@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   calculateBillTotalsPaise,
   computeBillPaymentProgress,
+  computeItemWiseGstBreakdown,
   formatSequentialBillNumber,
 } from './billing';
 import { BillStatus, TaxMode } from './enums';
@@ -91,4 +92,47 @@ test('computeBillPaymentProgress tracks partial payments, refunds, and full sett
     'INV-202611-00042',
   );
 });
+
+test('computeItemWiseGstBreakdown reconciles item-level taxable, discount, CGST and SGST paise to bill totals', () => {
+  const totals = calculateBillTotalsPaise({
+    itemsSubtotalPaise: 70000,
+    discountPaise: 5000,
+    gstRateBps: 500,
+    taxMode: TaxMode.EXCLUSIVE,
+    roundOffEnabled: false,
+  });
+
+  const rows = computeItemWiseGstBreakdown({
+    itemLines: [
+      {
+        id: 'l1',
+        orderItemId: 'oi1',
+        description: 'Paneer Tikka',
+        quantity: 1,
+        unitAmountPaise: 29900,
+        lineAmountPaise: 29900,
+      },
+      {
+        id: 'l2',
+        orderItemId: 'oi2',
+        description: 'Dal Makhani',
+        quantity: 2,
+        unitAmountPaise: 20050,
+        lineAmountPaise: 40100,
+      },
+    ],
+    discountPaise: totals.discountPaise,
+    taxMode: TaxMode.EXCLUSIVE,
+    gstRateBps: 500,
+    cgstPaise: totals.cgstPaise,
+    sgstPaise: totals.sgstPaise,
+  });
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows.reduce((s, r) => s + r.discountSharePaise, 0), totals.discountPaise);
+  assert.equal(rows.reduce((s, r) => s + r.taxablePaise, 0), totals.taxablePaise);
+  assert.equal(rows.reduce((s, r) => s + r.cgstPaise, 0), totals.cgstPaise);
+  assert.equal(rows.reduce((s, r) => s + r.sgstPaise, 0), totals.sgstPaise);
+});
+
 

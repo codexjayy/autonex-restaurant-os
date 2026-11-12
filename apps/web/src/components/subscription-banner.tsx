@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, Clock, Lock, ShieldAlert, Sparkles } from 'lucide-react';
 import {
   apiRequest,
+  subscribeWorkspaceSync,
   SubscriptionSummaryDto,
   TenantStatus,
 } from '@/lib/api-client';
@@ -25,15 +26,20 @@ export function SubscriptionBanner() {
 
   useEffect(() => {
     let active = true;
-    apiRequest<OwnerSubscriptionState>('/subscriptions/current')
-      .then((res) => {
-        if (active) setState(res);
-      })
-      .catch(() => {
-        // Roles such as Kitchen/Waiter do not have /subscriptions/current access
-      });
+    const fetchState = () => {
+      apiRequest<OwnerSubscriptionState>('/subscriptions/current')
+        .then((res) => {
+          if (active) setState(res);
+        })
+        .catch(() => {
+          // Roles such as Kitchen/Waiter do not have /subscriptions/current access
+        });
+    };
+    fetchState();
+    const unsub = subscribeWorkspaceSync(fetchState);
     return () => {
       active = false;
+      unsub();
     };
   }, []);
 

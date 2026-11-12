@@ -1,6 +1,8 @@
+import { TableStatus } from '@autonex/shared';
 import { Type } from 'class-transformer';
 import {
   IsBoolean,
+  IsEnum,
   IsInt,
   IsOptional,
   IsString,
@@ -22,11 +24,20 @@ export class CreateTableDto {
   label?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  floorSection?: string;
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(50)
   capacity?: number;
+
+  @IsOptional()
+  @IsEnum(TableStatus)
+  status?: TableStatus;
 
   @IsOptional()
   @IsBoolean()
@@ -46,11 +57,20 @@ export class UpdateTableDto {
   label?: string | null;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  floorSection?: string | null;
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(50)
   capacity?: number;
+
+  @IsOptional()
+  @IsEnum(TableStatus)
+  status?: TableStatus;
 
   @IsOptional()
   @IsBoolean()

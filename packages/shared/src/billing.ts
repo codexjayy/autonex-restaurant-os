@@ -163,6 +163,190 @@ export interface RefundDto {
   createdAt: string;
 }
 
+export interface BillItemGstDto {
+  lineId?: string;
+  orderItemId: string | null;
+  description: string;
+  quantity: number;
+  unitAmountPaise: number;
+  lineAmountPaise: number;
+  discountSharePaise: number;
+  taxablePaise: number;
+  gstRateBps: number;
+  cgstPaise: number;
+  sgstPaise: number;
+  lineTotalWithTaxPaise: number;
+}
+
+export interface BillAuditEntryDto {
+  id: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  actorUserId: string;
+  actorRole: string;
+  beforeJson: unknown | null;
+  afterJson: unknown | null;
+  createdAt: string;
+}
+
+export interface BillingPeriodBucketDto {
+  key: string;
+  label: string;
+  billsCount: number;
+  completedBillsCount: number;
+  grossSalesPaise: number;
+  discountPaise: number;
+  gstPaise: number;
+  collectedPaise: number;
+  refundedPaise: number;
+  netRevenuePaise: number;
+}
+
+export interface BillingAnalyticsDto {
+  timezone: string;
+  generatedAt: string;
+  today: {
+    dateKey: string;
+    totalSalesPaise: number;
+    collectedNetPaise: number;
+    cashCollectedPaise: number;
+    upiCollectedPaise: number;
+    upiManualPaise: number;
+    razorpayOnlinePaise: number;
+    cardCollectedPaise: number;
+    pendingPaymentsPaise: number;
+    pendingBillsCount: number;
+    gstCollectedPaise: number;
+    completedBillsCount: number;
+    openBillsCount: number;
+    partialBillsCount: number;
+    voidedBillsCount: number;
+    refundedTodayPaise: number;
+  };
+  allTime: {
+    totalPaidBillsCount: number;
+    totalNetCollectedPaise: number;
+    totalPendingDuePaise: number;
+  };
+  daily: BillingPeriodBucketDto[];
+  weekly: BillingPeriodBucketDto[];
+  monthly: BillingPeriodBucketDto[];
+}
+
+/**
+ * Distributes bill-level discount, taxable base, CGST, and SGST proportionally
+ * across item lines using Hamilton's largest-remainder method so line sums always
+ * reconcile to exact integer paise totals.
+ */
+export function distributeIntegerPaise(totalPaise: number, weights: number[]): number[] {
+  if (weights.length === 0) return [];
+  const totalWeight = weights.reduce((s, w) => s + Math.max(0, w), 0);
+  if (totalPaise === 0 || totalWeight === 0) {
+    return weights.map((_, idx) => (idx === 0 ? totalPaise : 0));
+  }
+
+  const sign = totalPaise < 0 ? -1 : 1;
+  const absTotal = Math.abs(totalPaise);
+  const exactShares = weights.map((w) => (absTotal * Math.max(0, w)) / totalWeight);
+  const floors = exactShares.map((v) => Math.floor(v));
+  let remainder = absTotal - floors.reduce((s, v) => s + v, 0);
+
+  const ranked = exactShares
+    .map((v, idx) => ({ idx, frac: v - (floors[idx] ?? 0) }))
+    .sort((a, b) => b.frac - a.frac || a.idx - b.idx);
+
+  for (let i = 0; i < ranked.length && remainder > 0; i++) {
+    const entry = ranked[i];
+    if (!entry) break;
+    floors[entry.idx] = (floors[entry.idx] ?? 0) + 1;
+    remainder -= 1;
+  }
+
+  return floors.map((v) => v * sign);
+}
+
+export function computeItemWiseGstBreakdown(params: {
+  itemLines: Array<{
+    id?: string;
+    orderItemId: string | null;
+    description: string;
+    quantity: number;
+    unitAmountPaise: number;
+    lineAmountPaise: number;
+  }>;
+  discountPaise: number;
+  taxMode: TaxMode;
+  gstRateBps: number;
+  cgstPaise: number;
+  sgstPaise: number;
+}): BillItemGstDto[] {
+  if (params.itemLines.length === 0) return [];
+  const weights = params.itemLines.map((l) => Math.max(0, l.lineAmountPaise));
+  const discountShares = distributeIntegerPaise(params.discountPaise, weights);
+  const cgstShares =
+    params.taxMode === TaxMode.NONE ? weights.map(() => 0) : distributeIntegerPaise(params.cgstPaise, weights);
+  const sgstShares =
+    params.taxMode === TaxMode.NONE ? weights.map(() => 0) : distributeIntegerPaise(params.sgstPaise, weights);
+
+  return params.itemLines.map((line, i) => {
+    const discountSharePaise = discountShares[i] ?? 0;
+    const netLinePaise = Math.max(0, line.lineAmountPaise - discountSharePaise);
+    const cgst = cgstShares[i] ?? 0;
+    const sgst = sgstShares[i] ?? 0;
+
+    if (params.taxMode === TaxMode.INCLUSIVE) {
+      const taxablePaise = Math.max(0, netLinePaise - cgst - sgst);
+      return {
+        lineId: line.id,
+        orderItemId: line.orderItemId,
+        description: line.description,
+        quantity: line.quantity,
+        unitAmountPaise: line.unitAmountPaise,
+        lineAmountPaise: line.lineAmountPaise,
+        discountSharePaise,
+        taxablePaise,
+        gstRateBps: params.gstRateBps,
+        cgstPaise: cgst,
+        sgstPaise: sgst,
+        lineTotalWithTaxPaise: netLinePaise,
+      };
+    }
+
+    if (params.taxMode === TaxMode.EXCLUSIVE) {
+      return {
+        lineId: line.id,
+        orderItemId: line.orderItemId,
+        description: line.description,
+        quantity: line.quantity,
+        unitAmountPaise: line.unitAmountPaise,
+        lineAmountPaise: line.lineAmountPaise,
+        discountSharePaise,
+        taxablePaise: netLinePaise,
+        gstRateBps: params.gstRateBps,
+        cgstPaise: cgst,
+        sgstPaise: sgst,
+        lineTotalWithTaxPaise: netLinePaise + cgst + sgst,
+      };
+    }
+
+    return {
+      lineId: line.id,
+      orderItemId: line.orderItemId,
+      description: line.description,
+      quantity: line.quantity,
+      unitAmountPaise: line.unitAmountPaise,
+      lineAmountPaise: line.lineAmountPaise,
+      discountSharePaise,
+      taxablePaise: netLinePaise,
+      gstRateBps: 0,
+      cgstPaise: 0,
+      sgstPaise: 0,
+      lineTotalWithTaxPaise: netLinePaise,
+    };
+  });
+}
+
 export interface BillSummaryDto {
   id: string;
   sessionId: string;
@@ -184,6 +368,7 @@ export interface BillSummaryDto {
   gstinSnapshot: string | null;
   outletNameSnapshot: string;
   outletAddressSnapshot: string | null;
+  receiptFooter?: string | null;
   tableNumber: string;
   tableLabel: string | null;
   voidReason: string | null;
@@ -191,6 +376,7 @@ export interface BillSummaryDto {
   paidAt: string | null;
   createdAt: string;
   lines: BillLineDto[];
+  itemGstBreakdown?: BillItemGstDto[];
   paymentAttempts: PaymentAttemptDto[];
   refunds: RefundDto[];
 }

@@ -74,6 +74,9 @@ DECLARE
   tbl TEXT;
   strict_tenant_tables TEXT[] := ARRAY[
     'outlets',
+    'tenant_settings',
+    'outlet_settings',
+    'invitations',
     'memberships',
     'categories',
     'menu_items',
@@ -116,7 +119,7 @@ $$;
 DO $$
 DECLARE
   tbl TEXT;
-  nullable_tenant_tables TEXT[] := ARRAY['refresh_tokens', 'audit_logs', 'webhook_events'];
+  nullable_tenant_tables TEXT[] := ARRAY['refresh_tokens', 'sessions', 'audit_logs', 'webhook_events'];
 BEGIN
   FOREACH tbl IN ARRAY nullable_tenant_tables LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
@@ -138,3 +141,18 @@ BEGIN
   END LOOP;
 END
 $$;
+
+ALTER TABLE roles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE roles FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation_roles ON roles;
+DROP POLICY IF EXISTS tenant_isolation_roles_write ON roles;
+CREATE POLICY tenant_isolation_roles ON roles
+  FOR SELECT TO autonex_app
+  USING (
+    tenant_id IS NULL
+    OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+  );
+CREATE POLICY tenant_isolation_roles_write ON roles
+  FOR ALL TO autonex_app
+  USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);

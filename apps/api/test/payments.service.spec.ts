@@ -65,6 +65,7 @@ describe('PaymentsService, RazorpayClientService & ReconciliationService — Pha
         id: tableId,
         tableNumber: '7',
         label: 'Terrace 7',
+        status: 'OCCUPIED',
       },
       bill: {
         id: billId,
@@ -112,6 +113,7 @@ describe('PaymentsService, RazorpayClientService & ReconciliationService — Pha
         session: {
           id: state.session.id,
           status: state.session.status,
+          tableId: state.session.tableId,
           table: state.table,
         },
       },
@@ -122,6 +124,7 @@ describe('PaymentsService, RazorpayClientService & ReconciliationService — Pha
       session: {
         id: state.session.id,
         status: state.session.status,
+        tableId: state.session.tableId,
         table: state.table,
       },
       lines: [],
@@ -161,6 +164,14 @@ describe('PaymentsService, RazorpayClientService & ReconciliationService — Pha
         update: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
           Object.assign(state.session, data);
           return state.session;
+        }),
+      },
+      restaurantTable: {
+        update: jest.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+          if (where.id === state.table.id) {
+            Object.assign(state.table, data);
+          }
+          return state.table;
         }),
       },
       paymentAttempt: {
@@ -339,6 +350,7 @@ describe('PaymentsService, RazorpayClientService & ReconciliationService — Pha
     expect(state.bill.paidPaise).toBe(20000);
     expect(state.bill.status).toBe(BillStatus.PARTIALLY_PAID);
     expect(state.session.status).toBe(DiningSessionStatus.BILL_REQUESTED); // Not yet settled!
+    expect(state.table.status).toBe('OCCUPIED'); // Table remains OCCUPIED until full settlement
 
     // Idempotent retry with same Idempotency-Key does NOT double-credit
     const replay = await paymentsService.recordManualPayment(
@@ -372,6 +384,7 @@ describe('PaymentsService, RazorpayClientService & ReconciliationService — Pha
     expect(state.bill.paidPaise).toBe(50000);
     expect(state.bill.status).toBe(BillStatus.PAID);
     expect(state.session.status).toBe(DiningSessionStatus.SETTLED);
+    expect(state.table.status).toBe('AVAILABLE'); // Table automatically released upon full settlement
     expect(state.paymentAllocations).toHaveLength(2);
   });
 
@@ -543,6 +556,7 @@ describe('PaymentsService, RazorpayClientService & ReconciliationService — Pha
     expect(state.bill.refundedPaise).toBe(10000);
     expect(state.bill.status).toBe(BillStatus.PARTIALLY_PAID);
     expect(state.session.status).toBe(DiningSessionStatus.BILL_REQUESTED);
+    expect(state.table.status).toBe('OCCUPIED');
     expect(state.auditLogs.some((a) => a.action === 'BILL_REFUND_ISSUED')).toBe(true);
   });
 

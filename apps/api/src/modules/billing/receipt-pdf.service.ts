@@ -97,6 +97,51 @@ export class ReceiptPdfService {
         doc.y = Math.max(yAfterText, yBefore + 11);
       }
 
+      if (
+        bill.taxMode !== TaxMode.NONE &&
+        bill.itemGstBreakdown &&
+        bill.itemGstBreakdown.length > 0
+      ) {
+        const halfRateLabel = (bill.gstRateBps / 200).toFixed(2).replace(/\.00$/, '');
+        this.drawDivider(doc, width);
+        doc.font('Helvetica-Bold').fontSize(7).fillColor('#0f172a');
+        doc.text(`ITEM-WISE GST BREAKUP (@ ${halfRateLabel}% CGST + ${halfRateLabel}% SGST)`);
+        doc.moveDown(0.2);
+
+        const colTaxableX = 16 + width - 114;
+        const colCgstX = 16 + width - 76;
+        const colSgstX = 16 + width - 38;
+        const hY = doc.y;
+        doc.font('Helvetica-Bold').fontSize(6.5).fillColor('#475569');
+        doc.text('ITEM', 16, hY, { width: width - 118 });
+        doc.text('TAXABLE', colTaxableX, hY, { width: 38, align: 'right' });
+        doc.text('CGST', colCgstX, hY, { width: 36, align: 'right' });
+        doc.text('SGST', colSgstX, hY, { width: 38, align: 'right' });
+        doc.y = hY + 10;
+
+        doc.font('Helvetica').fontSize(6.5).fillColor('#1e293b');
+        for (const row of bill.itemGstBreakdown) {
+          const rowY = doc.y;
+          doc.text(`${row.quantity}x ${row.description}`, 16, rowY, {
+            width: width - 120,
+          });
+          const afterNameY = doc.y;
+          doc.text(formatInrFromPaise(row.taxablePaise), colTaxableX, rowY, {
+            width: 38,
+            align: 'right',
+          });
+          doc.text(formatInrFromPaise(row.cgstPaise), colCgstX, rowY, {
+            width: 36,
+            align: 'right',
+          });
+          doc.text(formatInrFromPaise(row.sgstPaise), colSgstX, rowY, {
+            width: 38,
+            align: 'right',
+          });
+          doc.y = Math.max(afterNameY, rowY + 9);
+        }
+      }
+
       this.drawDivider(doc, width);
 
       this.drawSummaryRow(doc, width, 'Subtotal', formatInrFromPaise(bill.subtotalPaise));

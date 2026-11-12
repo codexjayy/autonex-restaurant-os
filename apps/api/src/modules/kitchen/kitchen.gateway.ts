@@ -84,14 +84,39 @@ export class KitchenGateway implements OnGatewayConnection, OnGatewayDisconnect 
       return;
     }
 
-    if (
-      !payload.tenantId ||
-      !payload.outletId ||
-      !ALLOWED_KDS_WS_ROLES.has(payload.role) ||
-      payload.tenantStatus === TenantStatus.SUSPENDED ||
-      payload.tenantStatus === TenantStatus.PENDING_APPROVAL
-    ) {
-      client.emit('kds:error', { code: 'FORBIDDEN', message: 'Access denied for KDS stream' });
+    if (!payload.tenantId || !payload.outletId || !ALLOWED_KDS_WS_ROLES.has(payload.role)) {
+      client.emit('kds:error', {
+        code: 'FORBIDDEN',
+        message: 'Your role or outlet selection does not allow live kitchen display access.',
+      });
+      client.disconnect(true);
+      return;
+    }
+
+    if (payload.tenantStatus === TenantStatus.PENDING_APPROVAL) {
+      client.emit('kds:error', {
+        code: 'TENANT_NOT_APPROVED',
+        message:
+          'Restaurant verification is pending approval. Live KDS unlocks automatically once approved.',
+      });
+      client.disconnect(true);
+      return;
+    }
+
+    if (payload.tenantStatus === TenantStatus.REJECTED) {
+      client.emit('kds:error', {
+        code: 'TENANT_REJECTED',
+        message: 'Restaurant registration was rejected. Kitchen display access is disabled.',
+      });
+      client.disconnect(true);
+      return;
+    }
+
+    if (payload.tenantStatus === TenantStatus.SUSPENDED) {
+      client.emit('kds:error', {
+        code: 'TENANT_SUSPENDED',
+        message: 'Restaurant access is currently suspended. Contact AutoNex support.',
+      });
       client.disconnect(true);
       return;
     }

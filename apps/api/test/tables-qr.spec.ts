@@ -1,6 +1,6 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ErrorCode, StaffRole, TenantStatus } from '@autonex/shared';
+import { ErrorCode, StaffRole, TableStatus, TenantStatus } from '@autonex/shared';
 import { TenantContextService } from '../src/common/context/tenant-context.service';
 import { AuthenticatedPrincipal } from '../src/common/decorators/current-user.decorator';
 import { PrismaService } from '../src/common/prisma/prisma.service';
@@ -54,7 +54,7 @@ describe('Table QR Security, Resolution & Bulk PDF (Phase 2)', () => {
         findMany: jest.fn(),
       },
       diningSession: {
-        findFirst: jest.fn(async () => null),
+        findFirst: jest.fn().mockResolvedValue(null),
       },
       auditLog: {
         create: jest.fn(async () => ({})),
@@ -157,6 +157,25 @@ describe('Table QR Security, Resolution & Bulk PDF (Phase 2)', () => {
     await expect(
       tablesService.createTable(principal, { tableNumber: 'T1' }),
     ).rejects.toThrow(ConflictException);
+  });
+
+  it('blocks deleting a table that has an active session or historical dining records', async () => {
+    const { tablesService, mockTx } = createTablesHarness();
+    mockTx.restaurantTable.findFirst.mockResolvedValue({
+      id: 'table-id-1',
+      tableNumber: 'T1',
+    });
+    mockTx.diningSession.findFirst.mockResolvedValueOnce({ id: 'session-1' });
+
+    await expect(tablesService.deleteTable(principal, 'table-id-1')).rejects.toThrow(
+      ConflictException,
+    );
+
+    mockTx.diningSession.findFirst.mockResolvedValueOnce(null);
+    mockTx.restaurantTable.delete.mockRejectedValueOnce({ code: 'P2003' });
+    await expect(tablesService.deleteTable(principal, 'table-id-1')).rejects.toThrow(
+      ConflictException,
+    );
   });
 
   it('rotates QR token by revoking previous tokens and bumping qrVersion', async () => {
@@ -314,4 +333,63 @@ describe('Table QR Security, Resolution & Bulk PDF (Phase 2)', () => {
     expect(bulkPdf.buffer.subarray(0, 5).toString('ascii')).toBe('%PDF-');
     expect(bulkPdf.buffer.length).toBeGreaterThan(singlePdf.buffer.length);
   }, 20000);
+
+  it('persists floorSection & Reserved status, rejects manual BILL_REQUESTED, and blocks status override during open sessions', async () => {
+    const { tablesService, mockTx } = createTablesHarness();
+
+    mockTx.restaurantTable.findFirst.mockResolvedValueOnce(null);
+    mockTx.restaurantTable.create.mockResolvedValueOnce({
+      id: 'table-reserved-1',
+      tableNumber: 'R1',
+      label: 'VIP Booth',
+      floorSection: 'Patio',
+      capacity: 6,
+      status: TableStatus.RESERVED,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const created = await tablesService.createTable(principal, {
+      tableNumber: 'R1',
+      label: 'VIP Booth',
+      floorSection: 'Patio',
+      capacity: 6,
+      status: TableStatus.RESERVED,
+    });
+
+    expect(created.floorSection).toBe('Patio');
+    expect(created.status).toBe(TableStatus.RESERVED);
+    expect(mockTx.restaurantTable.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          floorSection: 'Patio',
+          status: TableStatus.RESERVED,
+        }),
+      }),
+    );
+
+    await expect(
+      tablesService.createTable(principal, {
+        tableNumber: 'R2',
+        status: TableStatus.BILL_REQUESTED,
+      }),
+    ).rejects.toThrow(BadRequestException);
+
+    mockTx.restaurantTable.findFirst.mockResolvedValueOnce({
+      id: 'table-live-1',
+      tableNumber: 'T1',
+      floorSection: 'Main Hall',
+      capacity: 4,
+      status: TableStatus.OCCUPIED,
+      isActive: true,
+    });
+    mockTx.diningSession.findFirst.mockResolvedValueOnce({ id: 'session-live-1' });
+
+    await expect(
+      tablesService.updateTable(principal, 'table-live-1', {
+        status: TableStatus.AVAILABLE,
+      }),
+    ).rejects.toThrow(ConflictException);
+  });
 });

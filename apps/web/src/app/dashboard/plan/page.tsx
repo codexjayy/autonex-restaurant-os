@@ -18,6 +18,7 @@ import {
   apiRequest,
   PlanDto,
   RestaurantUsageTelemetryDto,
+  subscribeWorkspaceSync,
   SubscriptionInvoiceDto,
   SubscriptionSummaryDto,
   SupportCaseCategory,
@@ -111,6 +112,9 @@ export default function OwnerPlanAndSupportPage() {
 
   useEffect(() => {
     void loadAll();
+    return subscribeWorkspaceSync(() => {
+      void loadAll();
+    });
   }, [loadAll]);
 
   const handleDownloadCsv = () => {

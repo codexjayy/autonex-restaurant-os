@@ -62,6 +62,20 @@ export function evaluateSubscriptionLifecycle(
   const activeOpenSessionsCount = Math.max(0, input.activeOpenSessionsCount ?? 0);
   const pendingSuspension = Boolean(input.pendingSuspensionAfterService);
 
+  if (input.tenantStatus === TenantStatus.REJECTED) {
+    return {
+      effectiveSubscriptionStatus: SubscriptionStatus.SUSPENDED,
+      targetTenantStatus: TenantStatus.REJECTED,
+      daysRemaining: 0,
+      graceDaysRemaining: 0,
+      inGracePeriod: false,
+      isReadOnlyLocked: true,
+      orderingBlocked: true,
+      canSettleExistingSessions: false,
+      computedGraceEndsAt: null,
+    };
+  }
+
   if (input.tenantStatus === TenantStatus.PENDING_APPROVAL) {
     return {
       effectiveSubscriptionStatus: input.subscriptionStatus,
@@ -366,10 +380,15 @@ export interface PlatformOverviewDto {
   restaurantsByStatus: Record<TenantStatus, number>;
   subscriptionsByStatus: Record<SubscriptionStatus, number>;
   totalRestaurants: number;
+  approvedRestaurantsCount: number;
+  pendingApprovalCount: number;
+  rejectedCount: number;
   mrrPaise: number;
+  totalSubscriptionRevenuePaise: number;
   platformOrdersLast30Days: number;
   platformSessionsLast30Days: number;
   platformRevenueLast30DaysPaise: number;
+  totalRestaurantRevenuePaise: number;
   openSupportCasesCount: number;
 }
 

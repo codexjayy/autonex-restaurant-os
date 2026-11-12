@@ -9,12 +9,14 @@ import {
   ErrorCode,
   KdsTicketModifierSnapshot,
   KdsTicketPayload,
+  KitchenStation,
   KitchenStatus,
   OrderSource,
   StaffRole,
   canTransitionKitchenStatus,
 } from '@autonex/shared';
 import {
+  KitchenStation as PrismaKitchenStation,
   KitchenStatus as PrismaKitchenStatus,
   OutboxStatus as PrismaOutboxStatus,
   Prisma,
@@ -29,6 +31,7 @@ import { KdsOrdersQueryDto, UpdateKdsStatusDto } from './dto/kds.dto';
 
 const KDS_STATUS_EVENT_MAP: Record<KitchenStatus, string> = {
   [KitchenStatus.NEW]: 'ORDER_PLACED',
+  [KitchenStatus.ACKNOWLEDGED]: 'KOT_ACKNOWLEDGED',
   [KitchenStatus.PREPARING]: 'KOT_ACCEPTED',
   [KitchenStatus.READY]: 'KOT_READY',
   [KitchenStatus.SERVED]: 'KOT_SERVED',
@@ -44,6 +47,17 @@ export const KDS_TICKET_INCLUDE = {
       },
     },
   },
+  guest: {
+    select: {
+      displayLabel: true,
+    },
+  },
+  placedByMembership: {
+    select: {
+      id: true,
+      user: { select: { name: true } },
+    },
+  },
   acknowledgedByMembership: {
     select: {
       id: true,
@@ -52,6 +66,11 @@ export const KDS_TICKET_INCLUDE = {
   },
   items: {
     orderBy: { createdAt: 'asc' as const },
+    include: {
+      menuItem: {
+        select: { prepTimeMinutes: true, kitchenStation: true },
+      },
+    },
   },
 } satisfies Prisma.OrderInclude;
 
@@ -60,6 +79,42 @@ type OrderWithKdsRelations = Prisma.OrderGetPayload<{
 }>;
 
 export function serializeKdsTicket(order: OrderWithKdsRelations): KdsTicketPayload {
+  const mappedItems = order.items.map((item) => {
+    const itemWithSnapshot = item as typeof item & {
+      kitchenStationSnapshot?: PrismaKitchenStation;
+      menuItem?: { prepTimeMinutes?: number | null; kitchenStation?: PrismaKitchenStation } | null;
+    };
+    const resolvedStation =
+      (itemWithSnapshot.kitchenStationSnapshot as unknown as KitchenStation | undefined) ??
+      (itemWithSnapshot.menuItem?.kitchenStation as unknown as KitchenStation | undefined) ??
+      KitchenStation.MAIN_KITCHEN;
+
+    return {
+      id: item.id,
+      menuItemId: item.menuItemId,
+      itemNameSnapshot: item.itemNameSnapshot,
+      dietaryTypeSnapshot: item.dietaryTypeSnapshot as DietaryType,
+      kitchenStation: resolvedStation,
+      quantity: item.quantity,
+      modifiersSnapshotJson:
+        (item.modifiersSnapshotJson as unknown as KdsTicketModifierSnapshot[]) ?? [],
+      prepTimeMinutes: itemWithSnapshot.menuItem?.prepTimeMinutes ?? null,
+      prepNotes: item.prepNotes ?? null,
+      status: String(item.status),
+    };
+  });
+
+  const activeItems = mappedItems.filter(
+    (item) => item.status !== 'CANCELLED' && item.quantity > 0,
+  );
+  const stationSource = activeItems.length > 0 ? activeItems : mappedItems;
+  const stations = Array.from(
+    new Set(stationSource.map((item) => item.kitchenStation ?? KitchenStation.MAIN_KITCHEN)),
+  );
+  if (stations.length === 0) {
+    stations.push(KitchenStation.MAIN_KITCHEN);
+  }
+
   return {
     id: order.id,
     tenantId: order.tenantId,
@@ -68,11 +123,14 @@ export function serializeKdsTicket(order: OrderWithKdsRelations): KdsTicketPaylo
     tableId: order.session.table.id,
     tableNumber: order.session.table.tableNumber,
     tableLabel: order.session.table.label ?? null,
+    customerName: order.guest?.displayLabel ?? null,
+    placedByName: order.placedByMembership?.user?.name ?? null,
     roundNumber: order.roundNumber,
     kotNumber: order.kotNumber,
     isAddOn: order.isAddOn,
     source: order.source as OrderSource,
     kitchenStatus: order.kitchenStatus as KitchenStatus,
+    stations,
     subtotalPaise: order.subtotalPaise,
     notes: order.notes ?? null,
     acknowledgedAt: order.acknowledgedAt ? order.acknowledgedAt.toISOString() : null,
@@ -83,17 +141,7 @@ export function serializeKdsTicket(order: OrderWithKdsRelations): KdsTicketPaylo
     servedAt: order.servedAt ? order.servedAt.toISOString() : null,
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
-    items: order.items.map((item) => ({
-      id: item.id,
-      menuItemId: item.menuItemId,
-      itemNameSnapshot: item.itemNameSnapshot,
-      dietaryTypeSnapshot: item.dietaryTypeSnapshot as DietaryType,
-      quantity: item.quantity,
-      modifiersSnapshotJson:
-        (item.modifiersSnapshotJson as unknown as KdsTicketModifierSnapshot[]) ?? [],
-      prepNotes: item.prepNotes ?? null,
-      status: String(item.status),
-    })),
+    items: mappedItems,
   };
 }
 
@@ -113,9 +161,20 @@ export class KitchenService {
     return this.prisma.runInTenantTx(async (tx) => {
       const openStatuses: PrismaKitchenStatus[] = [
         PrismaKitchenStatus.NEW,
+        PrismaKitchenStatus.ACKNOWLEDGED,
         PrismaKitchenStatus.PREPARING,
         PrismaKitchenStatus.READY,
       ];
+
+      const stationFilter: Prisma.OrderWhereInput = query.station
+        ? {
+            items: {
+              some: {
+                kitchenStationSnapshot: query.station as PrismaKitchenStation,
+              },
+            },
+          }
+        : {};
 
       let where: Prisma.OrderWhereInput;
       if (sinceDate && !Number.isNaN(sinceDate.getTime())) {
@@ -123,11 +182,13 @@ export class KitchenService {
         where = {
           outletId: ctx.outletId,
           updatedAt: { gte: sinceDate },
+          ...stationFilter,
         };
       } else if (includeServed) {
         const recentCutoff = new Date(serverNow.getTime() - 45 * 60 * 1000);
         where = {
           outletId: ctx.outletId,
+          ...stationFilter,
           OR: [
             { kitchenStatus: { in: openStatuses } },
             { kitchenStatus: PrismaKitchenStatus.SERVED, servedAt: { gte: recentCutoff } },
@@ -137,6 +198,7 @@ export class KitchenService {
         where = {
           outletId: ctx.outletId,
           kitchenStatus: { in: openStatuses },
+          ...stationFilter,
         };
       }
 
@@ -162,6 +224,7 @@ export class KitchenService {
       const openCount = tickets.filter(
         (t) =>
           t.kitchenStatus === KitchenStatus.NEW ||
+          t.kitchenStatus === KitchenStatus.ACKNOWLEDGED ||
           t.kitchenStatus === KitchenStatus.PREPARING ||
           t.kitchenStatus === KitchenStatus.READY,
       ).length;
@@ -222,7 +285,7 @@ export class KitchenService {
       }
 
       // Idempotent acknowledgement so repeat clicks or flaky retries never fail or double-emit
-      if (existing.acknowledgedAt) {
+      if (existing.acknowledgedAt && existing.kitchenStatus !== PrismaKitchenStatus.NEW) {
         return {
           order: serializeKdsTicket(existing),
           alreadyAcknowledged: true,
@@ -233,8 +296,11 @@ export class KitchenService {
       const updated = await tx.order.update({
         where: { id: existing.id },
         data: {
-          acknowledgedAt: now,
-          acknowledgedByMembershipId: ctx.membershipId ?? null,
+          ...(existing.kitchenStatus === PrismaKitchenStatus.NEW
+            ? { kitchenStatus: PrismaKitchenStatus.ACKNOWLEDGED }
+            : {}),
+          acknowledgedAt: existing.acknowledgedAt ?? now,
+          acknowledgedByMembershipId: existing.acknowledgedByMembershipId ?? ctx.membershipId ?? null,
         },
         include: KDS_TICKET_INCLUDE,
       });
@@ -353,7 +419,12 @@ export class KitchenService {
         kitchenStatus: toStatus as PrismaKitchenStatus,
       };
 
-      if (toStatus === KitchenStatus.PREPARING) {
+      if (toStatus === KitchenStatus.ACKNOWLEDGED) {
+        updateData.acknowledgedAt = existing.acknowledgedAt ?? now;
+        if (!existing.acknowledgedByMembershipId && ctx.membershipId) {
+          updateData.acknowledgedByMembership = { connect: { id: ctx.membershipId } };
+        }
+      } else if (toStatus === KitchenStatus.PREPARING) {
         updateData.acceptedAt = existing.acceptedAt ?? now;
         if (!existing.acknowledgedAt) {
           updateData.acknowledgedAt = now;

@@ -1,10 +1,10 @@
-import { ConflictException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { StaffRole, SYSTEM_ROLE_SUPER_ADMIN, TenantStatus } from '@autonex/shared';
 import { TenantContextService } from '../src/common/context/tenant-context.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
-import { hashSecret, sha256Hex } from '../src/common/security/crypto.util';
+import { hashPassword, hashSecret, sha256Hex } from '../src/common/security/crypto.util';
 import { AdminService } from '../src/modules/admin/admin.service';
 import { AuthService } from '../src/modules/auth/auth.service';
 
@@ -268,6 +268,315 @@ describe('AuthService & AdminService (Phase 1 Flows)', () => {
     expect(suspended.status).toBe(TenantStatus.SUSPENDED);
     expect(revokedTokens).toHaveLength(1);
     expect(auditCreates).toHaveLength(2);
+  });
+
+  it('authenticates Super Admin via normalized 10-digit phone and blocks non-Super-Admin accounts', async () => {
+    const passwordHash = await hashPassword('SuperSecret99!');
+    const auditCreates: Array<{ action: string }> = [];
+    let lastWhere: unknown = null;
+
+    const superAdminUser = {
+      id: 'sa-1',
+      name: 'Platform Admin',
+      email: 'admin@autonex.in',
+      phone: '+919999999999',
+      passwordHash,
+      isActive: true,
+      isSuperAdmin: true,
+      deletedAt: null,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      memberships: [],
+    };
+
+    const ownerUser = {
+      id: 'owner-1',
+      name: 'Cafe Owner',
+      email: 'owner@cafe.in',
+      phone: '+919825000001',
+      passwordHash,
+      isActive: true,
+      isSuperAdmin: false,
+      deletedAt: null,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      memberships: [],
+    };
+
+    const adminDbMock = {
+      user: {
+        findFirst: jest.fn(async ({ where }) => {
+          lastWhere = where;
+          const serialized = JSON.stringify(where);
+          if (serialized.includes('+919999999999')) return superAdminUser;
+          if (serialized.includes('owner@cafe.in')) return ownerUser;
+          return null;
+        }),
+        update: jest.fn(async ({ data }) => ({ ...superAdminUser, ...data })),
+      },
+      refreshToken: {
+        create: jest.fn(async ({ data }) => data),
+      },
+      auditLog: {
+        create: jest.fn(async ({ data }) => {
+          auditCreates.push(data);
+          return data;
+        }),
+      },
+    };
+
+    const prismaMock = {
+      runAsSystemAdmin: jest.fn(async (cb: (db: typeof adminDbMock) => Promise<unknown>) =>
+        cb(adminDbMock),
+      ),
+    } as unknown as PrismaService;
+
+    const authService = new AuthService(prismaMock, jwtService, configService, new TenantContextService());
+
+    const res = await authService.superAdminLogin({
+      identifier: '9999999999',
+      password: 'SuperSecret99!',
+    });
+
+    expect(JSON.stringify(lastWhere)).toContain('+919999999999');
+    expect(res.user.isSuperAdmin).toBe(true);
+    expect(res.user.role).toBe(SYSTEM_ROLE_SUPER_ADMIN);
+    expect(auditCreates.some((a) => a.action === 'SUPER_ADMIN_LOGIN_SUCCESS')).toBe(true);
+
+    await expect(
+      authService.superAdminLogin({
+        identifier: 'owner@cafe.in',
+        password: 'SuperSecret99!',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(auditCreates.some((a) => a.action === 'SUPER_ADMIN_LOGIN_DENIED')).toBe(true);
+  });
+
+  it('locks Super Admin after 5 failed password attempts and rejects attempts while locked', async () => {
+    const passwordHash = await hashPassword('CorrectPass99!');
+    const auditCreates: Array<{ action: string }> = [];
+    const userUpdates: Array<{ failedLoginAttempts?: number; lockedUntil?: Date | null }> = [];
+    let lockedUntilState: Date | null = null;
+
+    const adminDbMock = {
+      user: {
+        findFirst: jest.fn(async () => ({
+          id: 'sa-lock-1',
+          name: 'Platform Admin',
+          email: 'admin@autonex.in',
+          phone: '+919999999999',
+          passwordHash,
+          isActive: true,
+          isSuperAdmin: true,
+          deletedAt: null,
+          failedLoginAttempts: 4,
+          lockedUntil: lockedUntilState,
+          memberships: [],
+        })),
+        update: jest.fn(async ({ data }) => {
+          userUpdates.push(data);
+          if (data.lockedUntil) lockedUntilState = data.lockedUntil;
+          return data;
+        }),
+      },
+      auditLog: {
+        create: jest.fn(async ({ data }) => {
+          auditCreates.push(data);
+          return data;
+        }),
+      },
+    };
+
+    const prismaMock = {
+      runAsSystemAdmin: jest.fn(async (cb: (db: typeof adminDbMock) => Promise<unknown>) =>
+        cb(adminDbMock),
+      ),
+    } as unknown as PrismaService;
+
+    const authService = new AuthService(prismaMock, jwtService, configService, new TenantContextService());
+
+    await expect(
+      authService.superAdminLogin({
+        identifier: 'admin@autonex.in',
+        password: 'WrongPassword1!',
+      }),
+    ).rejects.toBeInstanceOf(HttpException);
+
+    expect(userUpdates[0]?.failedLoginAttempts).toBe(5);
+    expect(userUpdates[0]?.lockedUntil).toBeInstanceOf(Date);
+    expect(auditCreates.some((a) => a.action === 'SUPER_ADMIN_LOGIN_LOCKED')).toBe(true);
+
+    // Subsequent valid password attempt while locked must still fail cleanly with 423
+    await expect(
+      authService.superAdminLogin({
+        identifier: 'admin@autonex.in',
+        password: 'CorrectPass99!',
+      }),
+    ).rejects.toBeInstanceOf(HttpException);
+    expect(auditCreates.some((a) => a.action === 'SUPER_ADMIN_LOGIN_BLOCKED_LOCKED')).toBe(true);
+  });
+
+  it('issues and consumes one-time Super Admin password reset tokens and avoids duplicate bootstrap admins', async () => {
+    const oldHash = await hashPassword('OldPassword123!');
+    const updatedUsers: Array<{ passwordHash?: string; failedLoginAttempts?: number }> = [];
+    const revokedTokens: unknown[] = [];
+    const auditCreates: Array<{ action: string }> = [];
+    const resetRecords: Array<{ id: string; userId: string; tokenHash: string; expiresAt: Date; usedAt: Date | null }> = [];
+
+    const txMock = {
+      user: {
+        update: jest.fn(async ({ data }) => {
+          updatedUsers.push(data);
+          return data;
+        }),
+      },
+      passwordResetToken: {
+        update: jest.fn(async ({ where, data }) => {
+          const rec = resetRecords.find((r) => r.id === where.id);
+          if (rec) rec.usedAt = data.usedAt;
+          return rec;
+        }),
+        updateMany: jest.fn(async () => ({ count: 0 })),
+      },
+      refreshToken: {
+        updateMany: jest.fn(async (args) => {
+          revokedTokens.push(args);
+          return { count: 2 };
+        }),
+      },
+      auditLog: {
+        create: jest.fn(async ({ data }) => {
+          auditCreates.push(data);
+          return data;
+        }),
+      },
+    };
+
+    const adminDbMock = {
+      user: {
+        count: jest.fn(async () => 1),
+        create: jest.fn(),
+        findFirst: jest.fn(async () => ({
+          id: 'sa-1',
+          name: 'Platform Admin',
+          email: 'admin@autonex.in',
+          phone: '+919999999999',
+          passwordHash: oldHash,
+          isActive: true,
+          isSuperAdmin: true,
+          deletedAt: null,
+          memberships: [],
+        })),
+      },
+      passwordResetToken: {
+        updateMany: jest.fn(async () => ({ count: 0 })),
+        create: jest.fn(async ({ data }) => {
+          const rec = { id: 'prt-1', ...data, usedAt: null };
+          resetRecords.push(rec);
+          return rec;
+        }),
+        findUnique: jest.fn(async ({ where }) => {
+          const rec = resetRecords.find((r) => r.tokenHash === where.tokenHash);
+          if (!rec) return null;
+          return {
+            ...rec,
+            user: {
+              id: 'sa-1',
+              isActive: true,
+              isSuperAdmin: true,
+              deletedAt: null,
+            },
+          };
+        }),
+      },
+      auditLog: {
+        create: jest.fn(async ({ data }) => {
+          auditCreates.push(data);
+          return data;
+        }),
+      },
+      $transaction: jest.fn(async (cb: (tx: typeof txMock) => Promise<unknown>) => cb(txMock)),
+    };
+
+    const prismaMock = {
+      runAsSystemAdmin: jest.fn(async (cb: (db: typeof adminDbMock) => Promise<unknown>) =>
+        cb(adminDbMock),
+      ),
+    } as unknown as PrismaService;
+
+    const authService = new AuthService(prismaMock, jwtService, configService, new TenantContextService());
+
+    // Idempotent bootstrap does not create duplicate super admins when count > 0
+    await authService.ensureInitialSuperAdminFromEnv();
+    expect(adminDbMock.user.create).not.toHaveBeenCalled();
+
+    const reqRes = await authService.requestSuperAdminPasswordReset({
+      identifier: 'admin@autonex.in',
+    });
+    expect(reqRes.ok).toBe(true);
+    expect(resetRecords).toHaveLength(1);
+    expect(auditCreates.some((a) => a.action === 'SUPER_ADMIN_PASSWORD_RESET_REQUESTED')).toBe(true);
+
+    // Seed a known raw token hash to verify consumption
+    const rawToken = 'reset_token_value_min_32_characters_secure_001';
+    resetRecords[0]!.tokenHash = sha256Hex(rawToken);
+
+    const resetRes = await authService.resetSuperAdminPassword({
+      token: rawToken,
+      newPassword: 'BrandNewPassword123!',
+    });
+    expect(resetRes.ok).toBe(true);
+    expect(updatedUsers[0]?.failedLoginAttempts).toBe(0);
+    expect(updatedUsers[0]?.passwordHash).toContain('$argon2id$');
+    expect(revokedTokens).toHaveLength(1);
+    expect(auditCreates.some((a) => a.action === 'SUPER_ADMIN_PASSWORD_RESET_COMPLETED')).toBe(true);
+  });
+
+  it('flags requiresPasswordChange for initial dev Super Admin credentials in dev and blocks them in production', async () => {
+    const devHash = await hashPassword('demo123');
+    const devUser = {
+      id: 'sa-dev-1',
+      name: 'Platform Admin',
+      email: 'demo@autonex.com',
+      phone: '+919999999999',
+      passwordHash: devHash,
+      passwordChangedAt: null,
+      isActive: true,
+      isSuperAdmin: true,
+      deletedAt: null,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      memberships: [],
+    };
+
+    const adminDbMock = {
+      user: {
+        findFirst: jest.fn(async () => devUser),
+        update: jest.fn(async ({ data }) => ({ ...devUser, ...data })),
+      },
+      refreshToken: { create: jest.fn(async ({ data }) => data) },
+      auditLog: { create: jest.fn(async ({ data }) => data) },
+    };
+
+    const prismaMock = {
+      runAsSystemAdmin: jest.fn(async (cb: (db: typeof adminDbMock) => Promise<unknown>) =>
+        cb(adminDbMock),
+      ),
+    } as unknown as PrismaService;
+
+    const devAuth = new AuthService(prismaMock, jwtService, configService, new TenantContextService());
+    const devRes = await devAuth.superAdminLogin({ identifier: 'demo@autonex.com', password: 'demo123' });
+    expect((devRes.user as { requiresPasswordChange?: boolean }).requiresPasswordChange).toBe(true);
+
+    const prodConfigService = {
+      get: (key: string) =>
+        key === 'NODE_ENV' ? 'production' : (configService as unknown as { get: (k: string) => unknown }).get(key),
+    } as unknown as ConfigService;
+
+    const prodAuth = new AuthService(prismaMock, jwtService, prodConfigService, new TenantContextService());
+    await expect(
+      prodAuth.superAdminLogin({ identifier: 'demo@autonex.com', password: 'demo123' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
 

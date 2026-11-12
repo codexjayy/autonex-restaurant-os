@@ -215,8 +215,10 @@ describe('KitchenService — KDS Ticket Board, Acknowledgement & Transitions (Ph
 
     const firstAck = await service.acknowledgeOrder(chefPrincipal, 'order-1');
     expect(firstAck.alreadyAcknowledged).toBe(false);
+    expect(firstAck.order.kitchenStatus).toBe(KitchenStatus.ACKNOWLEDGED);
     expect(firstAck.order.acknowledgedAt).toBeTruthy();
     expect(firstAck.order.acknowledgedByName).toBe('Chef Ramesh');
+    expect(firstAck.order.stations).toContain('MAIN_KITCHEN');
     expect(orderEvents).toHaveLength(1);
     expect(orderEvents[0]?.eventType).toBe('KOT_ACKNOWLEDGED');
     expect(outboxEvents).toHaveLength(1);
@@ -313,6 +315,13 @@ describe('KitchenService — KDS Ticket Board, Acknowledgement & Transitions (Ph
     const caughtUpDelta = await service.getKdsBoard(chefPrincipal, { since: beforeAckCursor });
     expect(caughtUpDelta.orders).toHaveLength(1);
     expect(caughtUpDelta.orders[0]?.acknowledgedAt).toBeTruthy();
+    expect(caughtUpDelta.orders[0]?.kitchenStatus).toBe(KitchenStatus.ACKNOWLEDGED);
+
+    const prepAfterAck = await service.transitionOrderStatus(chefPrincipal, 'order-1', {
+      status: KitchenStatus.PREPARING,
+    });
+    expect(prepAfterAck.order.kitchenStatus).toBe(KitchenStatus.PREPARING);
+    expect(prepAfterAck.order.acceptedAt).toBeTruthy();
   });
 });
 

@@ -1,9 +1,14 @@
-import { DietaryType, KitchenStatus, OrderSource } from './enums';
+import { DietaryType, KitchenStation, KitchenStatus, OrderSource } from './enums';
 
 export type KdsOutboxTopic = 'order.created' | 'kot.acknowledged' | 'kot.updated';
 
 export const KDS_ALLOWED_TRANSITIONS: Record<KitchenStatus, readonly KitchenStatus[]> = {
-  [KitchenStatus.NEW]: [KitchenStatus.PREPARING, KitchenStatus.CANCELLED],
+  [KitchenStatus.NEW]: [
+    KitchenStatus.ACKNOWLEDGED,
+    KitchenStatus.PREPARING,
+    KitchenStatus.CANCELLED,
+  ],
+  [KitchenStatus.ACKNOWLEDGED]: [KitchenStatus.PREPARING, KitchenStatus.CANCELLED],
   [KitchenStatus.PREPARING]: [KitchenStatus.READY, KitchenStatus.CANCELLED],
   [KitchenStatus.READY]: [KitchenStatus.SERVED],
   [KitchenStatus.SERVED]: [],
@@ -38,6 +43,8 @@ export interface KdsTicketItemPayload {
   dietaryTypeSnapshot: DietaryType;
   quantity: number;
   modifiersSnapshotJson: KdsTicketModifierSnapshot[];
+  prepTimeMinutes?: number | null;
+  kitchenStation?: KitchenStation;
   prepNotes: string | null;
   status: string;
 }
@@ -50,11 +57,14 @@ export interface KdsTicketPayload {
   tableId: string;
   tableNumber: string;
   tableLabel: string | null;
+  customerName?: string | null;
+  placedByName?: string | null;
   roundNumber: number;
   kotNumber: number;
   isAddOn: boolean;
   source: OrderSource;
   kitchenStatus: KitchenStatus;
+  stations?: KitchenStation[];
   subtotalPaise: number;
   notes: string | null;
   acknowledgedAt: string | null;

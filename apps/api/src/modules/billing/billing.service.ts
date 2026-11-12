@@ -7,12 +7,17 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import {
+  BillAuditEntryDto,
+  BillItemGstDto,
   BillLineType,
+  BillingAnalyticsDto,
+  BillingPeriodBucketDto,
   BillStatus,
   BillSummaryDto,
   BillingOutboxTopic,
   calculateBillTotalsPaise,
   computeBillPaymentProgress,
+  computeItemWiseGstBreakdown,
   ErrorCode,
   formatSequentialBillNumber,
   PaymentMethod,
@@ -30,7 +35,10 @@ import {
   KitchenStatus as PrismaKitchenStatus,
   OrderItemStatus as PrismaOrderItemStatus,
   OutboxStatus as PrismaOutboxStatus,
+  PaymentStatus as PrismaPaymentStatus,
   Prisma,
+  RefundStatus as PrismaRefundStatus,
+  TableStatus as PrismaTableStatus,
   TaxMode as PrismaTaxMode,
 } from '@prisma/client';
 import { TenantContextService } from '../../common/context/tenant-context.service';
@@ -85,6 +93,25 @@ export function serializeBillSummary(bill: BillWithRelations): BillSummaryDto {
     refundedPaise: bill.refundedPaise,
   });
 
+  const serializedLines = bill.lines.map((line) => ({
+    id: line.id,
+    orderItemId: line.orderItemId,
+    lineType: line.lineType as unknown as BillLineType,
+    description: line.description,
+    quantity: line.quantity,
+    unitAmountPaise: line.unitAmountPaise,
+    lineAmountPaise: line.lineAmountPaise,
+  }));
+
+  const itemGstBreakdown: BillItemGstDto[] = computeItemWiseGstBreakdown({
+    itemLines: serializedLines.filter((l) => l.lineType === BillLineType.ITEM),
+    discountPaise: bill.discountPaise,
+    taxMode: bill.taxMode as unknown as TaxMode,
+    gstRateBps: bill.gstRateBps,
+    cgstPaise: bill.cgstPaise,
+    sgstPaise: bill.sgstPaise,
+  });
+
   return {
     id: bill.id,
     sessionId: bill.sessionId,
@@ -112,15 +139,8 @@ export function serializeBillSummary(bill: BillWithRelations): BillSummaryDto {
     finalizedAt: bill.finalizedAt.toISOString(),
     paidAt: bill.paidAt ? bill.paidAt.toISOString() : null,
     createdAt: bill.createdAt.toISOString(),
-    lines: bill.lines.map((line) => ({
-      id: line.id,
-      orderItemId: line.orderItemId,
-      lineType: line.lineType as unknown as BillLineType,
-      description: line.description,
-      quantity: line.quantity,
-      unitAmountPaise: line.unitAmountPaise,
-      lineAmountPaise: line.lineAmountPaise,
-    })),
+    lines: serializedLines,
+    itemGstBreakdown,
     paymentAttempts: bill.paymentAttempts.map((p) => ({
       id: p.id,
       billId: p.billId,
@@ -289,7 +309,9 @@ export class BillingService {
       actorUserId: string;
       actorRole: string;
       discountPaise?: number;
+      discountPercentBps?: number;
       discountReason?: string;
+      refresh?: boolean;
       ipAddress: string | null;
     },
   ): Promise<{ bill: BillSummaryDto; alreadyExisted: boolean }> {
@@ -324,7 +346,137 @@ export class BillingService {
     });
 
     if (existingBill) {
-      return { bill: serializeBillSummary(existingBill), alreadyExisted: true };
+      if (!params.refresh) {
+        return { bill: serializeBillSummary(existingBill), alreadyExisted: true };
+      }
+
+      if (
+        existingBill.status !== PrismaBillStatus.OPEN ||
+        existingBill.paidPaise > 0 ||
+        existingBill.refundedPaise > 0
+      ) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message:
+            'Only unpaid OPEN bills with zero collected payments can be refreshed after order edits.',
+        });
+      }
+
+      const activeItems = session.orders.flatMap((o) => o.items);
+      if (activeItems.length === 0) {
+        throw new ConflictException({
+          code: ErrorCode.SESSION_EMPTY,
+          message: 'No active ordered items remain in this session.',
+        });
+      }
+
+      const itemsSubtotalPaise = activeItems.reduce((sum, item) => sum + item.lineTotalPaise, 0);
+      const nextDiscountPaise =
+        params.discountPaise !== undefined
+          ? params.discountPaise
+          : params.discountPercentBps !== undefined
+            ? Math.round((itemsSubtotalPaise * params.discountPercentBps) / 10000)
+            : Math.min(existingBill.discountPaise, itemsSubtotalPaise);
+      const nextDiscountReason =
+        nextDiscountPaise > 0
+          ? params.discountReason?.trim() || existingBill.discountReason || 'Bill Discount'
+          : null;
+
+      if (nextDiscountPaise > itemsSubtotalPaise) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_ERROR,
+          message: 'Discount cannot exceed the updated item subtotal.',
+        });
+      }
+
+      const calc = calculateBillTotalsPaise({
+        itemsSubtotalPaise,
+        discountPaise: nextDiscountPaise,
+        gstRateBps: session.outlet.gstRateBps,
+        taxMode: session.outlet.taxMode as unknown as TaxMode,
+        roundOffEnabled: session.outlet.roundOffEnabled,
+      });
+
+      const now = new Date();
+      await tx.billLine.deleteMany({ where: { billId: existingBill.id } });
+      const newLines = this.buildBillLinesData({
+        tenantId: params.tenantId,
+        billId: existingBill.id,
+        activeItems,
+        calc,
+        discountReason: nextDiscountReason,
+      });
+      if (newLines.length > 0) {
+        await tx.billLine.createMany({ data: newLines });
+      }
+
+      const nextStatus = calc.totalPaise === 0 ? PrismaBillStatus.PAID : PrismaBillStatus.OPEN;
+      await tx.bill.update({
+        where: { id: existingBill.id },
+        data: {
+          status: nextStatus,
+          subtotalPaise: calc.itemsSubtotalPaise,
+          discountPaise: calc.discountPaise,
+          discountReason: nextDiscountReason,
+          taxMode: calc.taxMode as unknown as PrismaTaxMode,
+          gstRateBps: calc.gstRateBps,
+          cgstPaise: calc.cgstPaise,
+          sgstPaise: calc.sgstPaise,
+          roundOffPaise: calc.roundOffPaise,
+          totalPaise: calc.totalPaise,
+          paidAt: nextStatus === PrismaBillStatus.PAID ? now : null,
+          billSnapshotJson: {
+            billNumber: existingBill.billNumber,
+            tableNumber: session.table.tableNumber,
+            tableLabel: session.table.label,
+            roundCount: session.orders.length,
+            rounds: session.orders.map((o) => ({
+              orderId: o.id,
+              roundNumber: o.roundNumber,
+              kotNumber: o.kotNumber,
+              subtotalPaise: o.subtotalPaise,
+            })),
+            totals: calc,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          tenantId: params.tenantId,
+          actorUserId: params.actorUserId,
+          actorRole: params.actorRole,
+          action: 'BILL_REFRESHED_FROM_ORDERS',
+          entityType: 'Bill',
+          entityId: existingBill.id,
+          beforeJson: {
+            subtotalPaise: existingBill.subtotalPaise,
+            totalPaise: existingBill.totalPaise,
+          },
+          afterJson: {
+            subtotalPaise: calc.itemsSubtotalPaise,
+            totalPaise: calc.totalPaise,
+            itemCount: activeItems.length,
+          },
+          ipAddress: params.ipAddress,
+        },
+      });
+
+      await this.emitBillingOutbox(tx, {
+        tenantId: params.tenantId,
+        outletId: params.outletId,
+        topic: 'bill.updated',
+        billId: existingBill.id,
+        sessionId: session.id,
+        tableId: session.table.id,
+        billStatus: nextStatus,
+      });
+
+      const refreshed = await tx.bill.findFirst({
+        where: { id: existingBill.id },
+        include: BILL_INCLUDE,
+      });
+      return { bill: serializeBillSummary(refreshed!), alreadyExisted: false };
     }
 
     if (session.status === PrismaDiningSessionStatus.CLOSED) {
@@ -343,7 +495,12 @@ export class BillingService {
     }
 
     const itemsSubtotalPaise = activeItems.reduce((sum, item) => sum + item.lineTotalPaise, 0);
-    const discountPaise = params.discountPaise ?? 0;
+    const discountPaise =
+      params.discountPaise !== undefined
+        ? params.discountPaise
+        : params.discountPercentBps !== undefined
+          ? Math.round((itemsSubtotalPaise * params.discountPercentBps) / 10000)
+          : 0;
 
     if (discountPaise > 0) {
       if (!FINANCIAL_STAFF_ROLES.has(params.actorRole)) {
@@ -505,7 +662,9 @@ export class BillingService {
             actorUserId: ctx.userId,
             actorRole: ctx.role,
             discountPaise: dto.discountPaise,
+            discountPercentBps: dto.discountPercentBps,
             discountReason: dto.discountReason,
+            refresh: dto.refresh,
             ipAddress,
           }),
         ctx.tenantId,
@@ -697,7 +856,20 @@ export class BillingService {
           message: 'Bill is already paid; issue a refund instead of altering discount.',
         });
       }
-      if (dto.discountPaise > bill.subtotalPaise) {
+
+      if (dto.discountPaise === undefined && dto.discountPercentBps === undefined) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_ERROR,
+          message: 'Specify either discountPaise or discountPercentBps.',
+        });
+      }
+
+      const resolvedDiscountPaise =
+        dto.discountPaise !== undefined
+          ? dto.discountPaise
+          : Math.round((bill.subtotalPaise * (dto.discountPercentBps ?? 0)) / 10000);
+
+      if (resolvedDiscountPaise > bill.subtotalPaise) {
         throw new BadRequestException({
           code: ErrorCode.VALIDATION_ERROR,
           message: 'Discount cannot exceed subtotal.',
@@ -711,7 +883,7 @@ export class BillingService {
 
       const calc = calculateBillTotalsPaise({
         itemsSubtotalPaise: bill.subtotalPaise,
-        discountPaise: dto.discountPaise,
+        discountPaise: resolvedDiscountPaise,
         gstRateBps: bill.gstRateBps,
         taxMode: bill.taxMode as unknown as TaxMode,
         roundOffEnabled: outlet?.roundOffEnabled ?? bill.roundOffPaise !== 0,
@@ -747,14 +919,38 @@ export class BillingService {
       });
 
       if (progress.status === BillStatus.PAID && bill.session.status !== PrismaDiningSessionStatus.CLOSED) {
-        await tx.diningSession.update({
-          where: { id: bill.sessionId },
-          data: {
-            status: PrismaDiningSessionStatus.SETTLED,
-            settledAt: now,
-            settledByMembershipId: ctx.membershipId ?? null,
-          },
-        });
+        let unbilledActiveItemsCount = 0;
+        if (tx.orderItem?.count) {
+          const billedItemIds = bill.lines
+            .map((l) => l.orderItemId)
+            .filter((id): id is string => Boolean(id));
+          unbilledActiveItemsCount = await tx.orderItem.count({
+            where: {
+              status: PrismaOrderItemStatus.ACTIVE,
+              quantity: { gt: 0 },
+              ...(billedItemIds.length > 0 ? { id: { notIn: billedItemIds } } : {}),
+              order: {
+                sessionId: bill.sessionId,
+                kitchenStatus: { not: PrismaKitchenStatus.CANCELLED },
+              },
+            },
+          });
+        }
+        if (unbilledActiveItemsCount === 0) {
+          await tx.diningSession.update({
+            where: { id: bill.sessionId },
+            data: {
+              status: PrismaDiningSessionStatus.SETTLED,
+              settledAt: now,
+              settledByMembershipId: ctx.membershipId ?? null,
+            },
+          });
+
+          await tx.restaurantTable?.update?.({
+            where: { id: bill.session.table.id },
+            data: { status: PrismaTableStatus.AVAILABLE },
+          });
+        }
       }
 
       // Replace non-item summary lines deterministically
@@ -790,6 +986,9 @@ export class BillingService {
           },
           afterJson: {
             discountPaise: calc.discountPaise,
+            ...(dto.discountPercentBps !== undefined
+              ? { discountPercentBps: dto.discountPercentBps }
+              : {}),
             reason: dto.reason.trim(),
             totalPaise: calc.totalPaise,
           },
@@ -892,6 +1091,374 @@ export class BillingService {
         include: BILL_INCLUDE,
       });
       return serializeBillSummary(updated!);
+    }, ctx.tenantId);
+  }
+
+  async getBillAuditLogs(
+    principal: AuthenticatedPrincipal,
+    billId: string,
+  ): Promise<BillAuditEntryDto[]> {
+    const ctx = requireOutletContext(principal);
+    if (!FINANCIAL_STAFF_ROLES.has(ctx.role)) {
+      throw new ForbiddenException({
+        code: ErrorCode.FORBIDDEN,
+        message: 'Only Owner, Manager, or Cashier can view billing audit logs.',
+      });
+    }
+
+    return this.prisma.runInTenantTx(async (tx) => {
+      const bill = await tx.bill.findFirst({
+        where: { id: billId, outletId: ctx.outletId },
+        include: {
+          paymentAttempts: { select: { id: true } },
+          refunds: { select: { id: true } },
+        },
+      });
+      if (!bill) {
+        throw new NotFoundException({
+          code: ErrorCode.BILL_NOT_FOUND,
+          message: 'Bill not found.',
+        });
+      }
+
+      const attemptIds = bill.paymentAttempts.map((p) => p.id);
+      const refundIds = bill.refunds.map((r) => r.id);
+
+      const rows = await tx.auditLog.findMany({
+        where: {
+          OR: [
+            { entityType: 'Bill', entityId: bill.id },
+            ...(attemptIds.length > 0
+              ? [{ entityType: 'PaymentAttempt', entityId: { in: attemptIds } }]
+              : []),
+            ...(refundIds.length > 0
+              ? [{ entityType: 'Refund', entityId: { in: refundIds } }]
+              : []),
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+
+      return rows.map((row) => ({
+        id: row.id,
+        action: row.action,
+        entityType: row.entityType,
+        entityId: row.entityId ?? bill.id,
+        actorUserId: row.actorUserId,
+        actorRole: row.actorRole,
+        beforeJson: row.beforeJson ?? null,
+        afterJson: row.afterJson ?? null,
+        createdAt: row.createdAt.toISOString(),
+      }));
+    }, ctx.tenantId);
+  }
+
+  async getBillingAnalytics(principal: AuthenticatedPrincipal): Promise<BillingAnalyticsDto> {
+    const ctx = requireOutletContext(principal);
+    if (!FINANCIAL_STAFF_ROLES.has(ctx.role)) {
+      throw new ForbiddenException({
+        code: ErrorCode.FORBIDDEN,
+        message: 'Only Owner, Manager, or Cashier can view revenue reports.',
+      });
+    }
+
+    return this.prisma.runInTenantTx(async (tx) => {
+      const outlet = await tx.outlet.findFirst({
+        where: { id: ctx.outletId },
+        select: { timezone: true },
+      });
+      const timezone = outlet?.timezone || 'Asia/Kolkata';
+
+      const formatYmd = (d: Date) =>
+        new Intl.DateTimeFormat('en-CA', {
+          timeZone: timezone,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).format(d);
+
+      const formatDayLabel = (d: Date) =>
+        new Intl.DateTimeFormat('en-IN', {
+          timeZone: timezone,
+          day: '2-digit',
+          month: 'short',
+        }).format(d);
+
+      const formatMonthKey = (d: Date) => formatYmd(d).slice(0, 7);
+      const formatMonthLabel = (d: Date) =>
+        new Intl.DateTimeFormat('en-IN', {
+          timeZone: timezone,
+          month: 'short',
+          year: 'numeric',
+        }).format(d);
+
+      const getWeekStartYmd = (ymd: string) => {
+        const [y, m, day] = ymd.split('-').map(Number);
+        const utc = new Date(Date.UTC(y ?? 2026, (m ?? 1) - 1, day ?? 1));
+        const dow = utc.getUTCDay(); // 0 Sun..6 Sat
+        const diff = dow === 0 ? -6 : 1 - dow; // Monday start
+        utc.setUTCDate(utc.getUTCDate() + diff);
+        return utc.toISOString().slice(0, 10);
+      };
+
+      const now = new Date();
+      const todayKey = formatYmd(now);
+
+      const dailyMap = new Map<string, BillingPeriodBucketDto>();
+      for (let i = 13; i >= 0; i--) {
+        const d = new Date(now.getTime() - i * 86400000);
+        const key = formatYmd(d);
+        dailyMap.set(key, {
+          key,
+          label: formatDayLabel(d),
+          billsCount: 0,
+          completedBillsCount: 0,
+          grossSalesPaise: 0,
+          discountPaise: 0,
+          gstPaise: 0,
+          collectedPaise: 0,
+          refundedPaise: 0,
+          netRevenuePaise: 0,
+        });
+      }
+
+      const weeklyMap = new Map<string, BillingPeriodBucketDto>();
+      for (let w = 7; w >= 0; w--) {
+        const d = new Date(now.getTime() - w * 7 * 86400000);
+        const weekKey = getWeekStartYmd(formatYmd(d));
+        if (!weeklyMap.has(weekKey)) {
+          const [wy, wm, wd] = weekKey.split('-').map(Number);
+          const weekDate = new Date(Date.UTC(wy ?? 2026, (wm ?? 1) - 1, wd ?? 1));
+          weeklyMap.set(weekKey, {
+            key: weekKey,
+            label: `Wk ${weekDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', timeZone: 'UTC' })}`,
+            billsCount: 0,
+            completedBillsCount: 0,
+            grossSalesPaise: 0,
+            discountPaise: 0,
+            gstPaise: 0,
+            collectedPaise: 0,
+            refundedPaise: 0,
+            netRevenuePaise: 0,
+          });
+        }
+      }
+
+      const monthlyMap = new Map<string, BillingPeriodBucketDto>();
+      for (let m = 5; m >= 0; m--) {
+        const ref = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - m, 15));
+        const key = formatMonthKey(ref);
+        monthlyMap.set(key, {
+          key,
+          label: formatMonthLabel(ref),
+          billsCount: 0,
+          completedBillsCount: 0,
+          grossSalesPaise: 0,
+          discountPaise: 0,
+          gstPaise: 0,
+          collectedPaise: 0,
+          refundedPaise: 0,
+          netRevenuePaise: 0,
+        });
+      }
+
+      const sixMonthsAgo = new Date(now.getTime() - 190 * 86400000);
+
+      const [bills, attempts, refunds] = await Promise.all([
+        tx.bill.findMany({
+          where: { outletId: ctx.outletId },
+          select: {
+            id: true,
+            status: true,
+            subtotalPaise: true,
+            discountPaise: true,
+            cgstPaise: true,
+            sgstPaise: true,
+            totalPaise: true,
+            paidPaise: true,
+            refundedPaise: true,
+            finalizedAt: true,
+          },
+        }),
+        tx.paymentAttempt.findMany({
+          where: {
+            outletId: ctx.outletId,
+            status: PrismaPaymentStatus.SUCCEEDED,
+            createdAt: { gte: sixMonthsAgo },
+          },
+          select: {
+            method: true,
+            provider: true,
+            amountPaise: true,
+            completedAt: true,
+            createdAt: true,
+          },
+        }),
+        tx.refund.findMany({
+          where: {
+            bill: { outletId: ctx.outletId },
+            status: PrismaRefundStatus.SUCCEEDED,
+            createdAt: { gte: sixMonthsAgo },
+          },
+          select: {
+            amountPaise: true,
+            processedAt: true,
+            createdAt: true,
+          },
+        }),
+      ]);
+
+      let pendingPaymentsPaise = 0;
+      let pendingBillsCount = 0;
+      let openBillsCount = 0;
+      let partialBillsCount = 0;
+      let voidedBillsCount = 0;
+      let totalPaidBillsCount = 0;
+      let totalNetCollectedPaise = 0;
+
+      let todaySalesPaise = 0;
+      let todayGstPaise = 0;
+      let todayCompletedBills = 0;
+
+      const addBillToBucket = (
+        bucket: BillingPeriodBucketDto | undefined,
+        bill: (typeof bills)[number],
+      ) => {
+        if (!bucket) return;
+        bucket.billsCount += 1;
+        if (bill.status === PrismaBillStatus.PAID) {
+          bucket.completedBillsCount += 1;
+        }
+        bucket.grossSalesPaise += bill.totalPaise;
+        bucket.discountPaise += bill.discountPaise;
+        bucket.gstPaise += bill.cgstPaise + bill.sgstPaise;
+      };
+
+      for (const bill of bills) {
+        if (bill.status === PrismaBillStatus.VOID) {
+          voidedBillsCount += 1;
+          continue;
+        }
+
+        const netPaid = Math.max(0, bill.paidPaise - bill.refundedPaise);
+        const due = Math.max(0, bill.totalPaise - netPaid);
+        totalNetCollectedPaise += netPaid;
+
+        if (bill.status === PrismaBillStatus.PAID) {
+          totalPaidBillsCount += 1;
+        } else if (bill.status === PrismaBillStatus.PARTIALLY_PAID) {
+          partialBillsCount += 1;
+          pendingBillsCount += 1;
+          pendingPaymentsPaise += due;
+        } else if (bill.status === PrismaBillStatus.OPEN) {
+          openBillsCount += 1;
+          pendingBillsCount += 1;
+          pendingPaymentsPaise += due;
+        }
+
+        const ymd = formatYmd(bill.finalizedAt);
+        const wKey = getWeekStartYmd(ymd);
+        const mKey = ymd.slice(0, 7);
+
+        addBillToBucket(dailyMap.get(ymd), bill);
+        addBillToBucket(weeklyMap.get(wKey), bill);
+        addBillToBucket(monthlyMap.get(mKey), bill);
+
+        if (ymd === todayKey) {
+          todaySalesPaise += bill.totalPaise;
+          todayGstPaise += bill.cgstPaise + bill.sgstPaise;
+          if (bill.status === PrismaBillStatus.PAID) {
+            todayCompletedBills += 1;
+          }
+        }
+      }
+
+      let todayCash = 0;
+      let todayUpiManual = 0;
+      let todayRazorpay = 0;
+      let todayCard = 0;
+
+      for (const p of attempts) {
+        const ts = p.completedAt ?? p.createdAt;
+        const ymd = formatYmd(ts);
+        const wKey = getWeekStartYmd(ymd);
+        const mKey = ymd.slice(0, 7);
+
+        for (const bucket of [dailyMap.get(ymd), weeklyMap.get(wKey), monthlyMap.get(mKey)]) {
+          if (bucket) {
+            bucket.collectedPaise += p.amountPaise;
+            bucket.netRevenuePaise += p.amountPaise;
+          }
+        }
+
+        if (ymd === todayKey) {
+          if (p.method === 'CASH') {
+            todayCash += p.amountPaise;
+          } else if (p.method === 'CARD') {
+            todayCard += p.amountPaise;
+          } else if (p.method === 'UPI_MANUAL') {
+            todayUpiManual += p.amountPaise;
+          } else {
+            todayRazorpay += p.amountPaise;
+          }
+        }
+      }
+
+      let refundedTodayPaise = 0;
+      for (const r of refunds) {
+        const ts = r.processedAt ?? r.createdAt;
+        const ymd = formatYmd(ts);
+        const wKey = getWeekStartYmd(ymd);
+        const mKey = ymd.slice(0, 7);
+
+        for (const bucket of [dailyMap.get(ymd), weeklyMap.get(wKey), monthlyMap.get(mKey)]) {
+          if (bucket) {
+            bucket.refundedPaise += r.amountPaise;
+            bucket.netRevenuePaise = Math.max(0, bucket.collectedPaise - bucket.refundedPaise);
+          }
+        }
+
+        if (ymd === todayKey) {
+          refundedTodayPaise += r.amountPaise;
+        }
+      }
+
+      const todayCollectedNet = Math.max(
+        0,
+        todayCash + todayUpiManual + todayRazorpay + todayCard - refundedTodayPaise,
+      );
+
+      return {
+        timezone,
+        generatedAt: now.toISOString(),
+        today: {
+          dateKey: todayKey,
+          totalSalesPaise: todaySalesPaise,
+          collectedNetPaise: todayCollectedNet,
+          cashCollectedPaise: todayCash,
+          upiCollectedPaise: todayUpiManual + todayRazorpay,
+          upiManualPaise: todayUpiManual,
+          razorpayOnlinePaise: todayRazorpay,
+          cardCollectedPaise: todayCard,
+          pendingPaymentsPaise,
+          pendingBillsCount,
+          gstCollectedPaise: todayGstPaise,
+          completedBillsCount: todayCompletedBills,
+          openBillsCount,
+          partialBillsCount,
+          voidedBillsCount,
+          refundedTodayPaise,
+        },
+        allTime: {
+          totalPaidBillsCount,
+          totalNetCollectedPaise,
+          totalPendingDuePaise: pendingPaymentsPaise,
+        },
+        daily: Array.from(dailyMap.values()),
+        weekly: Array.from(weeklyMap.values()),
+        monthly: Array.from(monthlyMap.values()),
+      };
     }, ctx.tenantId);
   }
 

@@ -35,6 +35,12 @@ export class BillingController {
     return this.billingService.listOutletBills(principal, query);
   }
 
+  @Roles(StaffRole.OWNER, StaffRole.MANAGER, StaffRole.CASHIER)
+  @Get('analytics')
+  getBillingAnalytics(@CurrentUser() principal: AuthenticatedPrincipal) {
+    return this.billingService.getBillingAnalytics(principal);
+  }
+
   @Roles(StaffRole.OWNER, StaffRole.MANAGER, StaffRole.CASHIER, StaffRole.WAITER)
   @Get('bills/:id')
   getBill(
@@ -42,6 +48,15 @@ export class BillingController {
     @Param('id', ParseUUIDPipe) billId: string,
   ) {
     return this.billingService.getBill(principal, billId);
+  }
+
+  @Roles(StaffRole.OWNER, StaffRole.MANAGER, StaffRole.CASHIER)
+  @Get('bills/:id/audit')
+  getBillAuditLogs(
+    @CurrentUser() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) billId: string,
+  ) {
+    return this.billingService.getBillAuditLogs(principal, billId);
   }
 
   @Roles(StaffRole.OWNER, StaffRole.MANAGER, StaffRole.CASHIER, StaffRole.WAITER)

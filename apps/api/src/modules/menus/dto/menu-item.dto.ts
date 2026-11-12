@@ -1,5 +1,11 @@
-import { DietaryType, SelectionType } from '@autonex/shared';
-import { Type } from 'class-transformer';
+import { DietaryType, KitchenStation, SelectionType, TaxMode } from '@autonex/shared';
+import { Transform, Type } from 'class-transformer';
+
+function toOptionalNullableInt({ value }: { value: unknown }) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  return Number(value);
+}
 import {
   ArrayMinSize,
   IsArray,
@@ -112,11 +118,33 @@ export class CreateMenuItemDto {
   @IsEnum(DietaryType)
   dietaryType?: DietaryType;
 
+  @IsOptional()
+  @IsEnum(KitchenStation)
+  kitchenStation?: KitchenStation;
+
   @Type(() => Number)
   @IsInt()
   @Min(0)
   @Max(10000000)
   basePricePaise!: number;
+
+  @IsOptional()
+  @Transform(toOptionalNullableInt)
+  @IsInt()
+  @Min(1)
+  @Max(240)
+  prepTimeMinutes?: number | null;
+
+  @IsOptional()
+  @Transform(toOptionalNullableInt)
+  @IsInt()
+  @Min(0)
+  @Max(2800)
+  gstRateBps?: number | null;
+
+  @IsOptional()
+  @IsEnum(TaxMode)
+  taxMode?: TaxMode | null;
 
   @IsOptional()
   @IsString()
@@ -169,11 +197,33 @@ export class UpdateMenuItemDto {
   dietaryType?: DietaryType;
 
   @IsOptional()
+  @IsEnum(KitchenStation)
+  kitchenStation?: KitchenStation;
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(0)
   @Max(10000000)
   basePricePaise?: number;
+
+  @IsOptional()
+  @Transform(toOptionalNullableInt)
+  @IsInt()
+  @Min(1)
+  @Max(240)
+  prepTimeMinutes?: number | null;
+
+  @IsOptional()
+  @Transform(toOptionalNullableInt)
+  @IsInt()
+  @Min(0)
+  @Max(2800)
+  gstRateBps?: number | null;
+
+  @IsOptional()
+  @IsEnum(TaxMode)
+  taxMode?: TaxMode | null;
 
   @IsOptional()
   @IsString()

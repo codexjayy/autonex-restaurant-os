@@ -62,5 +62,15 @@ export class RegisterRestaurantDto {
   @Min(0)
   @Max(2800)
   gstRateBps?: number;
+
+  @IsOptional()
+  @IsString()
+  @Length(3, 10)
+  currency?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(2, 20)
+  locale?: string;
 }
 

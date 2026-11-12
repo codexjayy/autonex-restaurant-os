@@ -57,6 +57,13 @@ export class TenantStatusGuard implements CanActivate {
       context.getClass(),
     ]);
 
+    if (user.tenantStatus === TenantStatus.REJECTED) {
+      throw new ForbiddenException({
+        code: ErrorCode.TENANT_REJECTED,
+        message: 'Restaurant registration has been rejected. Operations and login are disabled.',
+      });
+    }
+
     if (user.tenantStatus === TenantStatus.SUSPENDED) {
       if (allowDuringLock && this.prisma) {
         return this.checkOpenSessionDrainAllowance(user.tenantId);

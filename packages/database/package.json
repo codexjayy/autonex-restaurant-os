@@ -1,0 +1,26 @@
+{
+  "name": "@autonex/database",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build && node --test dist/**/*.spec.js",
+    "db:validate": "prisma validate --schema=../../prisma/schema.prisma",
+    "db:generate": "prisma generate --schema=../../prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema=../../prisma/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema=../../prisma/schema.prisma",
+    "db:seed": "tsx ../../prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.3"
+  }
+}
+

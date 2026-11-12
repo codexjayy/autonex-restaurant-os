@@ -3,12 +3,15 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
-import { DietaryType, ErrorCode, SelectionType } from '@autonex/shared';
+import { DietaryType, ErrorCode, KitchenStation, SelectionType } from '@autonex/shared';
 import {
   DietaryType as PrismaDietaryType,
+  KitchenStation as PrismaKitchenStation,
   Prisma,
   SelectionType as PrismaSelectionType,
+  TaxMode as PrismaTaxMode,
 } from '@prisma/client';
 import { TenantContextService } from '../../common/context/tenant-context.service';
 import {
@@ -16,6 +19,7 @@ import {
   requireOutletContext,
 } from '../../common/decorators/current-user.decorator';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimeEventsService } from '../../common/realtime/realtime-events.service';
 import { CreateCategoryDto, UpdateCategoryDto } from './dto/category.dto';
 import {
   CreateMenuItemDto,
@@ -44,6 +48,7 @@ export class MenusService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenantContext: TenantContextService,
+    @Optional() private readonly realtimeEvents?: RealtimeEventsService,
   ) {}
 
   /**
@@ -226,6 +231,12 @@ export class MenusService {
           },
         });
 
+        this.realtimeEvents?.emit({
+          type: 'menu.updated',
+          tenantId: ctx.tenantId,
+          outletId: ctx.outletId,
+          payload: { action: 'category.created', categoryId: category.id, name: category.name },
+        });
         return category;
       } catch (err) {
         if ((err as { code?: string })?.code === 'P2002') {
@@ -364,7 +375,11 @@ export class MenusService {
           name: dto.name.trim(),
           description: dto.description?.trim() || null,
           dietaryType: (dto.dietaryType ?? DietaryType.VEG) as PrismaDietaryType,
+          kitchenStation: (dto.kitchenStation ?? KitchenStation.MAIN_KITCHEN) as PrismaKitchenStation,
           basePricePaise: dto.basePricePaise,
+          prepTimeMinutes: dto.prepTimeMinutes ?? null,
+          gstRateBps: dto.gstRateBps ?? null,
+          taxMode: dto.taxMode ? (dto.taxMode as unknown as PrismaTaxMode) : null,
           imageUrl: dto.imageUrl && dto.imageUrl.trim() ? dto.imageUrl.trim() : null,
           inStock: dto.inStock ?? true,
           isActive: dto.isActive ?? true,
@@ -400,6 +415,13 @@ export class MenusService {
           },
           ipAddress,
         },
+      });
+
+      this.realtimeEvents?.emit({
+        type: 'menu.updated',
+        tenantId: ctx.tenantId,
+        outletId: ctx.outletId,
+        payload: { action: 'item.created', itemId: item.id, name: item.name },
       });
 
       return item;
@@ -483,7 +505,15 @@ export class MenusService {
           ...(dto.dietaryType !== undefined
             ? { dietaryType: dto.dietaryType as PrismaDietaryType }
             : {}),
+          ...(dto.kitchenStation !== undefined
+            ? { kitchenStation: dto.kitchenStation as PrismaKitchenStation }
+            : {}),
           ...(dto.basePricePaise !== undefined ? { basePricePaise: dto.basePricePaise } : {}),
+          ...(dto.prepTimeMinutes !== undefined ? { prepTimeMinutes: dto.prepTimeMinutes } : {}),
+          ...(dto.gstRateBps !== undefined ? { gstRateBps: dto.gstRateBps } : {}),
+          ...(dto.taxMode !== undefined
+            ? { taxMode: dto.taxMode ? (dto.taxMode as unknown as PrismaTaxMode) : null }
+            : {}),
           ...(dto.imageUrl !== undefined
             ? { imageUrl: dto.imageUrl && dto.imageUrl.trim() ? dto.imageUrl.trim() : null }
             : {}),
@@ -531,6 +561,13 @@ export class MenusService {
         },
       });
 
+      this.realtimeEvents?.emit({
+        type: 'menu.updated',
+        tenantId: ctx.tenantId,
+        outletId: ctx.outletId,
+        payload: { action: 'item.updated', itemId: updated.id, inStock: updated.inStock },
+      });
+
       return updated;
     }, ctx.tenantId);
   }
@@ -567,6 +604,13 @@ export class MenusService {
           afterJson: { inStock: updated.inStock },
           ipAddress,
         },
+      });
+
+      this.realtimeEvents?.emit({
+        type: 'menu.updated',
+        tenantId: ctx.tenantId,
+        outletId: ctx.outletId,
+        payload: { action: 'item.updated', itemId: updated.id, inStock: updated.inStock },
       });
 
       return updated;

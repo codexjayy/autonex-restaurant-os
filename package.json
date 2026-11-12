@@ -7,12 +7,13 @@
     "node": ">=20.11.0"
   },
   "scripts": {
-    "dev": "pnpm --filter @autonex/shared build && pnpm --parallel --filter @autonex/api --filter @autonex/web dev",
-    "build": "pnpm --filter @autonex/shared build && pnpm --filter @autonex/api build && pnpm --filter @autonex/web build",
+    "dev": "turbo run build --filter=@autonex/types --filter=@autonex/permissions --filter=@autonex/validation --filter=@autonex/auth --filter=@autonex/database --filter=@autonex/shared && pnpm --parallel --filter @autonex/api --filter @autonex/web dev",
+    "build": "turbo run build",
     "start": "pnpm --parallel --filter @autonex/api --filter @autonex/web start",
-    "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:e2e": "pnpm --filter @autonex/web test:e2e",
     "db:generate": "prisma generate --schema=prisma/schema.prisma",
     "db:validate": "prisma validate --schema=prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema=prisma/schema.prisma",
@@ -24,6 +25,7 @@
     "@types/node": "^22.10.2",
     "prisma": "^6.6.0",
     "tsx": "^4.19.2",
+    "turbo": "^2.4.4",
     "typescript": "^5.7.3"
   },
   "dependencies": {

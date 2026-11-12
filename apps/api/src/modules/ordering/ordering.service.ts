@@ -16,6 +16,7 @@ import {
   JOIN_CODE_TTL_MS,
   KdsTicketModifierSnapshot,
   KdsTicketPayload,
+  KitchenStation,
   KitchenStatus,
   mapSessionStatusToStage,
   OrderSource,
@@ -25,6 +26,7 @@ import {
   BillStatus as PrismaBillStatus,
   DiningSessionStatus as PrismaDiningSessionStatus,
   GuestJoinStatus as PrismaGuestJoinStatus,
+  KitchenStation as PrismaKitchenStation,
   KitchenStatus as PrismaKitchenStatus,
   OrderSource as PrismaOrderSource,
   OutboxStatus as PrismaOutboxStatus,
@@ -201,6 +203,8 @@ export class OrderingService {
       menuItemId: string;
       itemNameSnapshot: string;
       dietaryTypeSnapshot: (typeof dbItems)[number]['dietaryType'];
+      kitchenStationSnapshot: PrismaKitchenStation;
+      prepTimeMinutes: number | null;
       basePricePaiseSnapshot: number;
       modifiersSnapshotJson: Prisma.InputJsonValue;
       unitPricePaise: number;
@@ -309,6 +313,8 @@ export class OrderingService {
         menuItemId: dbItem.id,
         itemNameSnapshot: dbItem.name,
         dietaryTypeSnapshot: dbItem.dietaryType,
+        kitchenStationSnapshot: dbItem.kitchenStation,
+        prepTimeMinutes: dbItem.prepTimeMinutes ?? null,
         basePricePaiseSnapshot: dbItem.basePricePaise,
         modifiersSnapshotJson: selectedOptions.map((opt) => ({
           groupId: opt.groupId,
@@ -375,6 +381,7 @@ export class OrderingService {
             menuItemId: line.menuItemId,
             itemNameSnapshot: line.itemNameSnapshot,
             dietaryTypeSnapshot: line.dietaryTypeSnapshot,
+            kitchenStationSnapshot: line.kitchenStationSnapshot,
             basePricePaiseSnapshot: line.basePricePaiseSnapshot,
             modifiersSnapshotJson: line.modifiersSnapshotJson,
             unitPricePaise: line.unitPricePaise,
@@ -400,8 +407,26 @@ export class OrderingService {
       },
       include: {
         items: { orderBy: { createdAt: 'asc' } },
+        guest: { select: { displayLabel: true } },
+        placedByMembership: { select: { user: { select: { name: true } } } },
       },
     });
+
+    const itemPrepTimeByMenuId = new Map(
+      preparedLines.map((line) => [line.menuItemId, line.prepTimeMinutes]),
+    );
+    const ticketStations = Array.from(
+      new Set(
+        created.items.map(
+          (line) =>
+            (line.kitchenStationSnapshot as unknown as KitchenStation) ??
+            KitchenStation.MAIN_KITCHEN,
+        ),
+      ),
+    );
+    if (ticketStations.length === 0) {
+      ticketStations.push(KitchenStation.MAIN_KITCHEN);
+    }
 
     const kdsTicket: KdsTicketPayload = {
       id: created.id,
@@ -411,11 +436,14 @@ export class OrderingService {
       tableId,
       tableNumber,
       tableLabel,
+      customerName: created.guest?.displayLabel ?? null,
+      placedByName: created.placedByMembership?.user?.name ?? null,
       roundNumber,
       kotNumber: created.kotNumber,
       isAddOn,
       source: actor.source,
       kitchenStatus: KitchenStatus.NEW,
+      stations: ticketStations,
       subtotalPaise,
       notes: created.notes ?? null,
       acknowledgedAt: null,
@@ -431,9 +459,12 @@ export class OrderingService {
         menuItemId: line.menuItemId,
         itemNameSnapshot: line.itemNameSnapshot,
         dietaryTypeSnapshot: line.dietaryTypeSnapshot as SharedDietaryType,
+        kitchenStation:
+          (line.kitchenStationSnapshot as unknown as KitchenStation) ?? KitchenStation.MAIN_KITCHEN,
         quantity: line.quantity,
         modifiersSnapshotJson:
           (line.modifiersSnapshotJson as unknown as KdsTicketModifierSnapshot[]) ?? [],
+        prepTimeMinutes: itemPrepTimeByMenuId.get(line.menuItemId) ?? null,
         prepNotes: line.prepNotes ?? null,
         status: String(line.status ?? 'ACTIVE'),
       })),
@@ -526,7 +557,14 @@ export class OrderingService {
         },
       });
 
-      return tables.map((table) => {
+      const sortedTables = [...tables].sort((a, b) =>
+        a.tableNumber.localeCompare(b.tableNumber, undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        }),
+      );
+
+      return sortedTables.map((table) => {
         const activeSession = table.diningSessions[0] ?? null;
         const gstRateBps =
           (activeSession as { outlet?: { gstRateBps?: number } } | null)?.outlet?.gstRateBps ?? 500;
@@ -580,6 +618,7 @@ export class OrderingService {
           id: table.id,
           tableNumber: table.tableNumber,
           label: table.label,
+          floorSection: table.floorSection ?? null,
           capacity: table.capacity,
           tableStatus: table.status,
           lifecycleStage,
@@ -1298,6 +1337,13 @@ export class OrderingService {
     });
     if (!tenant) return;
 
+    if (tenant.status === PrismaTenantStatus.REJECTED) {
+      throw new ForbiddenException({
+        code: ErrorCode.TENANT_REJECTED,
+        message: 'Restaurant registration was rejected. Ordering is disabled.',
+      });
+    }
+
     if (tenant.status === PrismaTenantStatus.SUSPENDED) {
       throw new ForbiddenException({
         code: ErrorCode.TENANT_SUSPENDED,
@@ -1315,6 +1361,12 @@ export class OrderingService {
   }
 
   private assertResolvedQrOrderingAllowed(tenantStatus: string | undefined) {
+    if (tenantStatus === 'REJECTED') {
+      throw new ForbiddenException({
+        code: ErrorCode.TENANT_REJECTED,
+        message: 'Restaurant is unavailable for ordering.',
+      });
+    }
     if (tenantStatus === 'SUSPENDED') {
       throw new ForbiddenException({
         code: ErrorCode.TENANT_SUSPENDED,
