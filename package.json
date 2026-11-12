@@ -1,0 +1,32 @@
+{
+  "name": "autonex-restaurant-os",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@12.9.1",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @autonex/shared build && pnpm --parallel --filter @autonex/api --filter @autonex/web dev",
+    "build": "pnpm --filter @autonex/shared build && pnpm --filter @autonex/api build && pnpm --filter @autonex/web build",
+    "start": "pnpm --parallel --filter @autonex/api --filter @autonex/web start",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "db:generate": "prisma generate --schema=prisma/schema.prisma",
+    "db:validate": "prisma validate --schema=prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema=prisma/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema=prisma/schema.prisma",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:studio": "prisma studio --schema=prisma/schema.prisma"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "prisma": "^6.6.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.6.0"
+  }
+}

@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: autonex_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-autonex}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d autonex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: autonex_redis
+    profiles: ["scale"]
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: autonex_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://autonex_app:autonex_app_pass@postgres:5432/autonex?schema=public
+      DATABASE_MIGRATION_URL: postgresql://postgres:postgres@postgres:5432/autonex?schema=public
+      DATABASE_ADMIN_URL: postgresql://autonex_admin:autonex_admin_pass@postgres:5432/autonex?schema=public
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000/api/v1}
+    container_name: autonex_web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000/api/v1}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pg_data:
+  redis_data:
